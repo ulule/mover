@@ -6,12 +6,6 @@ It uses the underlying introspection API from your RDMS to retrieve automaticall
 
 ## Usage
 
-Tunnel backup database:
-
-```console
-ssh -L 5432:localhost:5433 root@b1.db1.prod.infra.ulule.com
-```
-
 Export configuration to a environment variable:
 
 ```console
@@ -27,11 +21,11 @@ mkdir -p output
 Extract data from backup database:
 
 ```console
-run main.go -dsn "postgresql://ulule:ulule@localhost:5433/ulule" -path output -action load
+go run cmd/mover/main.go -dsn "postgresql://user:password@localhost:5433/dbname" -path output -action extract -query "SELECT * FROM user WHERE id = 1" -table "user"
 ```
 
 Load data to your local database:
 
 ```console
-go run main.go -dsn "postgresql://ulule:ulule@localhost/ulule" -path output -action load
+go run cmd/mover/main.go -dsn "postgresql://user:password@localhost:5433/dbname" -path output -action load
 ```

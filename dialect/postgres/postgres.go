@@ -17,10 +17,11 @@ import (
 
 var fkReg = regexp.MustCompile(`FOREIGN KEY \((.*?)\) REFERENCES (?:(.*?)\.)?(.*?)\((.*?)\)`)
 
+// NewPGDialect initializes a new PGDialect instance.
 func NewPGDialect(ctx context.Context, dsn string) (dialect.Dialect, error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to connect to database with dsn %s: %w", dsn, err)
 	}
 
 	return &PGDialect{
@@ -28,18 +29,21 @@ func NewPGDialect(ctx context.Context, dsn string) (dialect.Dialect, error) {
 	}, nil
 }
 
+// PGDialect manages a connection with PostgreSQL.
 type PGDialect struct {
 	conn *pgx.Conn
 }
 
+// CLose closes a connection.
 func (d *PGDialect) Close(ctx context.Context) error {
 	return d.conn.Close(ctx)
 }
 
+// ResultSet executes a query and converts Rows in map[string]interface{}.
 func (d *PGDialect) ResultSet(ctx context.Context, query string, args ...interface{}) ([]map[string]interface{}, error) {
-	rows, err := d.conn.Query(ctx, query, args...)
+	rows, err := d.query(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to retrieve results : %w", err)
 	}
 
 	results := make([]map[string]interface{}, 0)
@@ -55,25 +59,19 @@ func (d *PGDialect) ResultSet(ctx context.Context, query string, args ...interfa
 	return results, nil
 }
 
-func (d *PGDialect) insert(ctx context.Context, table dialect.Table, data map[string]interface{}) error {
-	pairs, err := valuesToPairs(table, data)
-	if err != nil {
-		return err
-	}
-	query, args := lk.Insert(table.Name).Set(pairs...).Query()
-	if _, err := d.conn.Exec(ctx, query, args...); err != nil {
-		return err
-	}
-
-	return nil
-}
-
+// BulkInsert inserts multiple data a single database transaction. It disables triggers to avoid conflicts on
+// foreign constraints.
 func (d *PGDialect) BulkInsert(ctx context.Context, table dialect.Table, data []map[string]interface{}) error {
+	var err error
+
 	tx, err := d.conn.Begin(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to begin transaction on table %s: %w", table.Name, err)
 	}
-	defer tx.Rollback(ctx)
+
+	defer func() {
+		err = tx.Rollback(ctx)
+	}()
 
 	if err := d.disableTriggers(ctx, table, func(ctx context.Context) error {
 		for i := range data {
@@ -88,55 +86,17 @@ func (d *PGDialect) BulkInsert(ctx context.Context, table dialect.Table, data []
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		return fmt.Errorf("unable to commit transaction on table %s: %w", table.Name, err)
 	}
 
-	return d.resetSequence(ctx, table)
+	if err := d.resetSequence(ctx, table); err != nil {
+		return fmt.Errorf("unable to reset sequence on table %s: %w", table.Name, err)
+	}
+
+	return err
 }
 
-func (d *PGDialect) disableTriggers(ctx context.Context, table dialect.Table, f func(ctx context.Context) error) error {
-	if _, err := d.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER ALL;", table.Name)); err != nil {
-		return err
-	}
-
-	if err := f(ctx); err != nil {
-		return err
-	}
-
-	if _, err := d.conn.Exec(ctx, fmt.Sprintf("ALTER TABLE %s ENABLE TRIGGER ALL;", table.Name)); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (d *PGDialect) resetSequence(ctx context.Context, table dialect.Table) error {
-	tableSeqName := fmt.Sprintf("%s_id_seq", table.Name)
-	primaryKey := table.PrimaryKeys[0]
-
-	var rawNextval interface{}
-	if err := d.conn.QueryRow(ctx, fmt.Sprintf("SELECT nextval('%s')", tableSeqName)).Scan(&rawNextval); err != nil {
-		return err
-	}
-	var rawMaxval interface{}
-	if err := d.conn.QueryRow(ctx, fmt.Sprintf("SELECT MAX(%s) FROM %s", primaryKey.Name, table.Name)).Scan(&rawMaxval); err != nil {
-		return err
-	}
-
-	if rawMaxval != nil && rawNextval != nil {
-		nextval := interfaceToInt64(rawNextval)
-		maxval := interfaceToInt64(rawMaxval)
-
-		if maxval > nextval {
-			if _, err := d.conn.Exec(ctx, fmt.Sprintf("SELECT setval('%s', COALESCE((SELECT MAX(id)+1 FROM %s), 1), false);", tableSeqName, table.Name)); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
+// ReferenceKeys returns the "Referenced by" constraints of a table.
 func (d *PGDialect) ReferenceKeys(ctx context.Context, tableName string) (dialect.ReferenceKeys, error) {
 	oid, err := d.getTableOID(ctx, tableName)
 	if err != nil {
@@ -159,8 +119,8 @@ func (d *PGDialect) ReferenceKeys(ctx context.Context, tableName string) (dialec
 		Column  string `db:"column"`
 	}
 
-	if err := pgxscan.Select(ctx, d.conn, &results, query, args...); err != nil {
-		return nil, err
+	if err := d.execQuery(ctx, &results, query, args...); err != nil {
+		return nil, fmt.Errorf("unable to retrieve table %s reference keys: %w", tableName, err)
 	}
 	referenceKeys := make(dialect.ReferenceKeys, len(results))
 	for i := range referenceKeys {
@@ -173,6 +133,7 @@ func (d *PGDialect) ReferenceKeys(ctx context.Context, tableName string) (dialec
 	return referenceKeys, nil
 }
 
+// ForeignKeys returns the foreign keys of a table.
 func (d *PGDialect) ForeignKeys(ctx context.Context, tableName string) (dialect.ForeignKeys, error) {
 	oid, err := d.getTableOID(ctx, tableName)
 	if err != nil {
@@ -194,8 +155,8 @@ func (d *PGDialect) ForeignKeys(ctx context.Context, tableName string) (dialect.
 		Condef  string `db:"condef"`
 	}
 
-	if err := pgxscan.Select(ctx, d.conn, &results, query, args...); err != nil {
-		return nil, err
+	if err := d.execQuery(ctx, &results, query, args...); err != nil {
+		return nil, fmt.Errorf("unable to retrieve table %s foreign keys: %w", tableName, err)
 	}
 
 	foreignKeys := make(dialect.ForeignKeys, len(results))
@@ -215,6 +176,7 @@ func (d *PGDialect) ForeignKeys(ctx context.Context, tableName string) (dialect.
 	return foreignKeys, nil
 }
 
+// PrimaryKeyConstraint returns the primary key constraint of a table.
 func (d *PGDialect) PrimaryKeyConstraint(ctx context.Context, tableName string) (string, error) {
 	oid, err := d.getTableOID(ctx, tableName)
 	if err != nil {
@@ -229,12 +191,13 @@ func (d *PGDialect) PrimaryKeyConstraint(ctx context.Context, tableName string) 
 	query, args := builder.Query()
 
 	var result string
-	if err := d.conn.QueryRow(ctx, query, args...).Scan(&result); err != nil {
-		return "", err
+	if err := d.queryRow(ctx, &result, query, args...); err != nil {
+		return "", fmt.Errorf("unable to retrieve table %s primary key constraint: %w", tableName, err)
 	}
 	return result, nil
 }
 
+// PrimaryKeys returns primary keys of a table.
 func (d *PGDialect) PrimaryKeys(ctx context.Context, tableName string) ([]dialect.PrimaryKey, error) {
 	oid, err := d.getTableOID(ctx, tableName)
 	if err != nil {
@@ -258,8 +221,8 @@ func (d *PGDialect) PrimaryKeys(ctx context.Context, tableName string) ([]dialec
 		DataType string `db:"data_type"`
 	}
 
-	if err := pgxscan.Select(ctx, d.conn, &results, query, args...); err != nil {
-		return nil, err
+	if err := d.execQuery(ctx, &results, query, args...); err != nil {
+		return nil, fmt.Errorf("unable to retrieve table %s primary keys: %w", tableName, err)
 	}
 
 	primaryKeys := make([]dialect.PrimaryKey, len(results))
@@ -274,34 +237,7 @@ func (d *PGDialect) PrimaryKeys(ctx context.Context, tableName string) ([]dialec
 	return primaryKeys, err
 }
 
-func (d *PGDialect) getTableOID(ctx context.Context, tableName string) (int64, error) {
-	builder := lk.Select("c.oid").
-		From("pg_catalog.pg_class c").
-		Join(lk.Table("pg_catalog.pg_namespace n"), lk.On("n.oid", "c.relnamespace"), lk.LeftJoin).
-		Where(lk.Condition("pg_catalog.pg_table_is_visible(c.oid)")).
-		And(lk.Condition("c.relname").Equal(tableName)).
-		And(lk.Raw("c.relkind IN ('r', 'v', 'm', 'f', 'p')")).
-		Comment("table oid")
-	query, args := builder.Query()
-
-	var result pgtype.OID
-	if err := d.conn.QueryRow(ctx, query, args...).Scan(&result); err != nil {
-		return 0, err
-	}
-
-	val, err := result.Value()
-	if err != nil {
-		return 0, err
-	}
-
-	switch val.(type) {
-	case int64:
-		return val.(int64), nil
-	}
-
-	return 0, fmt.Errorf("Unable to cast %v to int64", val)
-}
-
+// Columns returns sorted columns with types of a table.
 func (d *PGDialect) Columns(ctx context.Context, tableName string) ([]dialect.Column, error) {
 	builder := lk.Select(
 		"a.attname AS column_name",
@@ -343,7 +279,7 @@ func (d *PGDialect) Columns(ctx context.Context, tableName string) ([]dialect.Co
 		TableName       string         `db:"table_name"`
 	}
 
-	if err := pgxscan.Select(ctx, d.conn, &results, query, args...); err != nil {
+	if err := d.execQuery(ctx, &results, query, args...); err != nil {
 		return nil, err
 	}
 
@@ -363,6 +299,7 @@ func (d *PGDialect) Columns(ctx context.Context, tableName string) ([]dialect.Co
 	return columns, nil
 }
 
+// Table returns a table with its reference keys, foreign keys, columns and primary keys.
 func (d *PGDialect) Table(ctx context.Context, tableName string) (dialect.Table, error) {
 	columns, err := d.Columns(ctx, tableName)
 	if err != nil {
@@ -391,6 +328,7 @@ func (d *PGDialect) Table(ctx context.Context, tableName string) (dialect.Table,
 	return table, nil
 }
 
+// Tables returns all the tables from the database.
 func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 	builder := lk.Select("c.relname").
 		From("pg_catalog.pg_class c").
@@ -402,14 +340,13 @@ func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 	query, args := builder.Query()
 
 	var tableNames []string
-	err := pgxscan.Select(ctx, d.conn, &tableNames, query, args...)
-	if err != nil {
-		return nil, err
+	if err := d.execQuery(ctx, &tableNames, query, args...); err != nil {
+		return nil, fmt.Errorf("unable to execute query %s: %w", builder.String(), err)
 	}
 
 	columns, err := d.Columns(ctx, "")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to retrieve columns: %w", err)
 	}
 
 	sortedColumns := make(map[string]dialect.Columns)
@@ -445,7 +382,142 @@ func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 		}
 	}
 
+	tablesMap := make(map[string]dialect.Table, len(tables))
+	for i := range tables {
+		tablesMap[tables[i].Name] = tables[i]
+	}
+
+	for i := range tables {
+		for j := range tables[i].ReferenceKeys {
+			tables[i].ReferenceKeys[j].Table = tablesMap[tables[i].ReferenceKeys[j].TableName]
+		}
+
+		for j := range tables[i].ForeignKeys {
+			tables[i].ForeignKeys[j].ReferencedTable = tablesMap[tables[i].ForeignKeys[j].ReferencedTableName]
+		}
+	}
+
 	return tables, nil
+}
+
+func (d *PGDialect) execQuery(ctx context.Context, result interface{}, query string, args ...interface{}) error {
+	if err := pgxscan.Select(ctx, d.conn, result, query, args...); err != nil {
+		return fmt.Errorf("unable to execute query %s with args %v: %w", query, args, err)
+	}
+
+	return nil
+}
+
+func (d *PGDialect) queryRow(ctx context.Context, result interface{}, query string, args ...interface{}) error {
+	if err := d.conn.QueryRow(ctx, query, args...).Scan(result); err != nil {
+		return fmt.Errorf("unable to execute query %s with args %v: %w", query, args, err)
+	}
+
+	return nil
+}
+
+func (d *PGDialect) query(ctx context.Context, query string, args ...interface{}) (pgx.Rows, error) {
+	rows, err := d.conn.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("unable to execute query %s with args %v: %w", query, args, err)
+	}
+
+	return rows, nil
+}
+
+func (d *PGDialect) getTableOID(ctx context.Context, tableName string) (int64, error) {
+	builder := lk.Select("c.oid").
+		From("pg_catalog.pg_class c").
+		Join(lk.Table("pg_catalog.pg_namespace n"), lk.On("n.oid", "c.relnamespace"), lk.LeftJoin).
+		Where(lk.Condition("pg_catalog.pg_table_is_visible(c.oid)")).
+		And(lk.Condition("c.relname").Equal(tableName)).
+		And(lk.Raw("c.relkind IN ('r', 'v', 'm', 'f', 'p')")).
+		Comment("table oid")
+	query, args := builder.Query()
+
+	var result pgtype.OID
+	if err := d.queryRow(ctx, &result, query, args...); err != nil {
+		return 0, fmt.Errorf("unable to retrieve table %s oid: %w", tableName, err)
+	}
+
+	val, err := result.Value()
+	if err != nil {
+		return 0, fmt.Errorf("unable to retrieve table %s oid from driver value: %w", tableName, err)
+	}
+
+	switch val := val.(type) {
+	case int64:
+		return val, nil
+	}
+
+	return 0, fmt.Errorf("unable to cast %v to int64", val)
+}
+
+func (d *PGDialect) exec(ctx context.Context, query string, args ...interface{}) error {
+	if _, err := d.conn.Exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("unable to execute query %s with args %v: %w", query, args, err)
+	}
+
+	return nil
+}
+
+func (d *PGDialect) insert(ctx context.Context, table dialect.Table, data map[string]interface{}) error {
+	pairs, err := valuesToPairs(table, data)
+	if err != nil {
+		return fmt.Errorf("unable to convert %v to pairs: %w", data, err)
+	}
+
+	query, args := lk.Insert(table.Name).
+		Set(pairs...).
+		OnConflict(table.PrimaryKeyColumnName(), lk.DoUpdate(pairs...)).
+		Query()
+	if err := d.exec(ctx, query, args...); err != nil {
+		return fmt.Errorf("unable to insert %v+ to %s:%w", pairs, table.Name, err)
+	}
+
+	return nil
+}
+
+func (d *PGDialect) disableTriggers(ctx context.Context, table dialect.Table, f func(ctx context.Context) error) error {
+	if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER ALL;", table.Name)); err != nil {
+		return err
+	}
+
+	if err := f(ctx); err != nil {
+		return err
+	}
+
+	if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s ENABLE TRIGGER ALL;", table.Name)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (d *PGDialect) resetSequence(ctx context.Context, table dialect.Table) error {
+	tableSeqName := fmt.Sprintf("%s_id_seq", table.Name)
+
+	var rawNextval interface{}
+	if err := d.queryRow(ctx, &rawNextval, fmt.Sprintf("SELECT nextval('%s')", tableSeqName)); err != nil {
+		return err
+	}
+	var rawMaxval interface{}
+	if err := d.queryRow(ctx, &rawMaxval, fmt.Sprintf("SELECT MAX(%s) FROM %s", table.PrimaryKeyColumnName(), table.Name)); err != nil {
+		return err
+	}
+
+	if rawMaxval != nil && rawNextval != nil {
+		nextval := interfaceToInt64(rawNextval)
+		maxval := interfaceToInt64(rawMaxval)
+
+		if maxval > nextval {
+			if err := d.exec(ctx, fmt.Sprintf("SELECT setval('%s', COALESCE((SELECT MAX(id)+1 FROM %s), 1), false);", tableSeqName, table.Name)); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 var _ dialect.Dialect = (*PGDialect)(nil)
