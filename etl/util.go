@@ -58,9 +58,14 @@ func chunkStrings(slice []string, chunkSize int) [][]string {
 	return chunks
 }
 
-func downloadFiles(ctx context.Context, filenames []string, outputPath string) error {
+func downloadFiles(ctx context.Context, filenames []string, outputPath string, chunkSize int) error {
 	g, _ := errgroup.WithContext(ctx)
-	chunks := chunkStrings(filenames, 10)
+	var chunks [][]string
+	if chunkSize == 0 {
+		chunks = [][]string{filenames}
+	} else {
+		chunks = chunkStrings(filenames, chunkSize)
+	}
 	for i := range chunks {
 		for j := range chunks[i] {
 			g.Go((func(filename string) func() error {
@@ -81,7 +86,7 @@ func downloadFiles(ctx context.Context, filenames []string, outputPath string) e
 	return nil
 }
 
-func downloadFile(absoluteURL string, output string) error {
+func downloadFile(absoluteURL string, outputDir string) error {
 	res, err := http.Get(absoluteURL)
 	if err != nil {
 		return fmt.Errorf("unable to retrieve %s: %w", absoluteURL, err)
@@ -89,7 +94,7 @@ func downloadFile(absoluteURL string, output string) error {
 	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
-		return fmt.Errorf("unable to download %s to %s: received %d HTTP code", absoluteURL, output, res.StatusCode)
+		return fmt.Errorf("unable to download %s to %s: received %d HTTP code", absoluteURL, outputDir, res.StatusCode)
 	}
 
 	u, err := url.Parse(absoluteURL)
@@ -97,12 +102,12 @@ func downloadFile(absoluteURL string, output string) error {
 		return fmt.Errorf("unable to parse %s: %w", absoluteURL, err)
 	}
 
-	path := filepath.Join(output, filepath.Dir(u.Path))
+	path := filepath.Join(outputDir, filepath.Dir(u.Path))
 	if err := os.MkdirAll(path, os.ModePerm); err != nil {
 		return fmt.Errorf("unable to create directory %s: %w", path, err)
 	}
 
-	file, err := os.Create(filepath.Join(output, u.Path))
+	file, err := os.Create(filepath.Join(outputDir, u.Path))
 	if err != nil {
 		return fmt.Errorf("unable to create file %s: %w", path, err)
 	}

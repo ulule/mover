@@ -12,16 +12,17 @@ import (
 	"github.com/ulule/mover/dialect"
 )
 
-type resultSet []map[string]interface{}
-type extract map[string]entry
-type entry map[string]resultSet
-
-type extractor struct {
-	extract extract
-	dialect dialect.Dialect
-	schema  map[string]config.Schema
-	logger  *zap.Logger
-}
+type (
+	resultSet []map[string]interface{}
+	extract   map[string]entry
+	entry     map[string]resultSet
+	extractor struct {
+		extract extract
+		dialect dialect.Dialect
+		schema  map[string]config.Schema
+		logger  *zap.Logger
+	}
+)
 
 func depthF(depth int, msg string, args ...interface{}) string {
 	return strings.Repeat("\t", depth+1) + fmt.Sprintf(msg, args...)

@@ -17,6 +17,40 @@ import (
 	"github.com/ulule/mover/dialect/postgres"
 )
 
+// copySchemaTables copies tables from database to schema configuration.
+func copySchemaTables(schema []config.Schema, tables []dialect.Table) map[string]config.Schema {
+	schemas := make(map[string]config.Schema, len(tables))
+	for i := range tables {
+		tableName := tables[i].Name
+		found := false
+		for j := range schema {
+			if tables[i].Name == schema[j].TableName {
+				found = true
+				schema[j].Table = tables[i]
+				schemas[tableName] = schema[j]
+
+			}
+		}
+
+		if !found {
+			schemas[tableName] = config.Schema{
+				TableName: tables[i].Name,
+				Table:     tables[i],
+			}
+		}
+
+		for k := range schemas[tableName].Queries {
+			for j := range tables {
+				if tables[j].Name == schemas[tableName].Queries[k].TableName {
+					schemas[tableName].Queries[k].Table = tables[j]
+				}
+			}
+		}
+	}
+
+	return schemas
+}
+
 // Engine extracts and loads data from database with specific dialect.
 type Engine struct {
 	schema  map[string]config.Schema
@@ -33,55 +67,24 @@ type jsonPayload struct {
 
 // NewEngine returns a new Engine instance.
 func NewEngine(ctx context.Context, cfg config.Config, dsn string, logger *zap.Logger) (*Engine, error) {
-	etl := &Engine{
-		config: cfg,
-		logger: logger,
-	}
-
-	dialect, err := etl.newDialect(ctx, dsn)
+	dialect, err := postgres.NewPGDialect(ctx, dsn)
 	if err != nil {
 		return nil, err
 	}
-
-	etl.dialect = dialect
 
 	tables, err := dialect.Tables(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	schema := make(map[string]config.Schema, len(tables))
-	for i := range tables {
-		tableName := tables[i].Name
-		found := false
-		for j := range cfg.Schema {
-			if tables[i].Name == cfg.Schema[j].TableName {
-				found = true
-				cfg.Schema[j].Table = tables[i]
-				schema[tableName] = cfg.Schema[j]
+	schema := copySchemaTables(cfg.Schema, tables)
 
-			}
-		}
-
-		if !found {
-			schema[tableName] = config.Schema{
-				TableName: tables[i].Name,
-				Table:     tables[i],
-			}
-		}
-
-		for k := range schema[tableName].Queries {
-			for j := range tables {
-				if tables[j].Name == schema[tableName].Queries[k].TableName {
-					schema[tableName].Queries[k].Table = tables[j]
-				}
-			}
-		}
-	}
-
-	etl.schema = schema
-
-	return etl, nil
+	return &Engine{
+		config:  cfg,
+		logger:  logger,
+		dialect: dialect,
+		schema:  schema,
+	}, nil
 }
 
 // Describe returns a table from its name.
@@ -164,16 +167,12 @@ func (e *Engine) extract(ctx context.Context, outputPath string, schema config.S
 			zap.String("files", strings.Join(filenames, " ")),
 			zap.String("output_path", outputPath))
 
-		if err := downloadFiles(ctx, filenames, path.Join(outputPath, "media")); err != nil {
+		if err := downloadFiles(ctx, filenames, path.Join(outputPath, "media"), 10); err != nil {
 			e.logger.Error("unable to download files", zap.Error(err))
 		}
 	}
 
 	return nil
-}
-
-func (e *Engine) newDialect(ctx context.Context, dsn string) (dialect.Dialect, error) {
-	return postgres.NewPGDialect(ctx, dsn)
 }
 
 func (e *Engine) newLoader() *loader {
