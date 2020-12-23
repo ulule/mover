@@ -47,9 +47,9 @@ func (c Columns) Get(name string) Column {
 	return Column{}
 }
 
-func (a Columns) Len() int           { return len(a) }
-func (a Columns) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a Columns) Less(i, j int) bool { return a[i].Position < a[j].Position }
+func (c Columns) Len() int           { return len(c) }
+func (c Columns) Swap(i, j int)      { c[i], c[j] = c[j], c[i] }
+func (c Columns) Less(i, j int) bool { return c[i].Position < c[j].Position }
 
 // Column contains the definition of a column table.
 type Column struct {

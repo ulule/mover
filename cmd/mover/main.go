@@ -38,7 +38,6 @@ func main() {
 		logger, _ = zap.NewDevelopment()
 	} else {
 		logger, _ = zap.NewProduction()
-
 	}
 	// nolint:errcheck
 	defer logger.Sync()

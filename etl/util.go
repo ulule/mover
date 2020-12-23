@@ -86,7 +86,7 @@ func downloadFiles(ctx context.Context, filenames []string, outputPath string, c
 	return nil
 }
 
-func downloadFile(absoluteURL string, outputDir string) error {
+func downloadFile(absoluteURL, outputDir string) error {
 	res, err := http.Get(absoluteURL)
 	if err != nil {
 		return fmt.Errorf("unable to retrieve %s: %w", absoluteURL, err)

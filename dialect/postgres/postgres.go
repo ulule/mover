@@ -170,7 +170,6 @@ func (d *PGDialect) ForeignKeys(ctx context.Context, tableName string) (dialect.
 			ReferencedTableName:  matches[3],
 			ReferencedColumnName: matches[4],
 		}
-
 	}
 
 	return foreignKeys, nil
@@ -440,13 +439,13 @@ func (d *PGDialect) getTableOID(ctx context.Context, tableName string) (int64, e
 		return 0, fmt.Errorf("unable to retrieve table %s oid: %w", tableName, err)
 	}
 
-	val, err := result.Value()
+	raw, err := result.Value()
 	if err != nil {
 		return 0, fmt.Errorf("unable to retrieve table %s oid from driver value: %w", tableName, err)
 	}
 
-	switch val := val.(type) {
-	case int64:
+	val, ok := raw.(int64)
+	if ok {
 		return val, nil
 	}
 

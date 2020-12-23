@@ -13,12 +13,12 @@ import (
 
 	lk "github.com/ulule/loukoum/v3"
 	"github.com/ulule/mover/config"
-	"github.com/ulule/mover/dialect"
+	dialectpkg "github.com/ulule/mover/dialect"
 	"github.com/ulule/mover/dialect/postgres"
 )
 
 // copySchemaTables copies tables from database to schema configuration.
-func copySchemaTables(schema []config.Schema, tables []dialect.Table) map[string]config.Schema {
+func copySchemaTables(schema []config.Schema, tables []dialectpkg.Table) map[string]config.Schema {
 	schemas := make(map[string]config.Schema, len(tables))
 	for i := range tables {
 		tableName := tables[i].Name
@@ -28,7 +28,6 @@ func copySchemaTables(schema []config.Schema, tables []dialect.Table) map[string
 				found = true
 				schema[j].Table = tables[i]
 				schemas[tableName] = schema[j]
-
 			}
 		}
 
@@ -54,7 +53,7 @@ func copySchemaTables(schema []config.Schema, tables []dialect.Table) map[string
 // Engine extracts and loads data from database with specific dialect.
 type Engine struct {
 	schema  map[string]config.Schema
-	dialect dialect.Dialect
+	dialect dialectpkg.Dialect
 	config  config.Config
 	logger  *zap.Logger
 }
@@ -88,7 +87,7 @@ func NewEngine(ctx context.Context, cfg config.Config, dsn string, logger *zap.L
 }
 
 // Describe returns a table from its name.
-func (e *Engine) Describe(ctx context.Context, tableName string) (dialect.Table, error) {
+func (e *Engine) Describe(ctx context.Context, tableName string) (dialectpkg.Table, error) {
 	schema, ok := e.schema[tableName]
 	if !ok {
 		return schema.Table, fmt.Errorf("table %s does not exist", tableName)
@@ -103,7 +102,7 @@ func (e *Engine) Load(ctx context.Context, outputPath string) error {
 }
 
 // Extract extracts data to an output directory with a table name and its query.
-func (e *Engine) Extract(ctx context.Context, outputPath string, tableName string, query string) error {
+func (e *Engine) Extract(ctx context.Context, outputPath, tableName, query string) error {
 	extractor := e.newExtractor()
 
 	cache, err := extractor.Handle(ctx, e.schema[tableName], query)
@@ -125,7 +124,6 @@ func (e *Engine) Extract(ctx context.Context, outputPath string, tableName strin
 		if err := e.extract(ctx, outputPath, e.schema[tableName], cache[tableName]); err != nil {
 			return fmt.Errorf("unable to extract rows from table %s: %w", tableName, err)
 		}
-
 	}
 
 	return nil

@@ -24,8 +24,8 @@ type (
 	}
 )
 
-func depthF(depth int, msg string, args ...interface{}) string {
-	return strings.Repeat("\t", depth+1) + fmt.Sprintf(msg, args...)
+func depthF(depth int, msg string) string {
+	return strings.Repeat("\t", depth+1) + msg
 }
 
 func (e *extractor) handleReferenceKeys(ctx context.Context, depth int, table dialect.Table, row map[string]interface{}) error {
@@ -48,8 +48,9 @@ func (e *extractor) handleReferenceKeys(ctx context.Context, depth int, table di
 		}
 	}
 
-	for _, referenceKey := range referenceKeys {
+	for i := range referenceKeys {
 		value := row[primaryKey.Name]
+		referenceKey := referenceKeys[i]
 
 		query, args := lk.Select("*").
 			From(referenceKey.Table.Name).
@@ -64,7 +65,8 @@ func (e *extractor) handleReferenceKeys(ctx context.Context, depth int, table di
 		}
 	}
 
-	for _, query := range schema.Queries {
+	for i := range schema.Queries {
+		query := schema.Queries[i]
 		exec := replaceVar(query.Query, row)
 		e.logger.Debug(depthF(depth+1, "Execute query"),
 			zap.String("query", exec))
