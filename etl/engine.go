@@ -102,8 +102,13 @@ func (e *Engine) Load(ctx context.Context, outputPath string) error {
 }
 
 // Extract extracts data to an output directory with a table name and its query.
-func (e *Engine) Extract(ctx context.Context, outputPath, tableName, query string) error {
+func (e *Engine) Extract(ctx context.Context, outputPath, query string) error {
 	extractor := e.newExtractor()
+
+	tableName := getQueryTable(query)
+	if tableName == "" {
+		return fmt.Errorf("unable to retrieve table from query: %s", query)
+	}
 
 	cache, err := extractor.Handle(ctx, e.schema[tableName], query)
 	if err != nil {

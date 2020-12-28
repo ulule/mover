@@ -23,7 +23,6 @@ var (
 
 func main() {
 	flag.StringVar(&query, "query", "", "query to execute")
-	flag.StringVar(&tableName, "table", "", "table name to export")
 	flag.StringVar(&path, "path", "", "directory output")
 	flag.StringVar(&dsn, "dsn", "", "database dsn")
 	flag.StringVar(&action, "action", "", "action to execute")
@@ -62,7 +61,7 @@ func main() {
 
 	switch action {
 	case "extract":
-		if err := engine.Extract(ctx, path, tableName, query); err != nil {
+		if err := engine.Extract(ctx, path, query); err != nil {
 			logger.Error("unable to extract data",
 				zap.Error(err),
 				zap.String("table_name", tableName),

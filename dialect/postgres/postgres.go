@@ -15,7 +15,7 @@ import (
 	"github.com/ulule/mover/dialect"
 )
 
-var fkReg = regexp.MustCompile(`FOREIGN KEY \((.*?)\) REFERENCES (?:(.*?)\.)?(.*?)\((.*?)\)`)
+var fkRegexp = regexp.MustCompile(`FOREIGN KEY \((.*?)\) REFERENCES (?:(.*?)\.)?(.*?)\((.*?)\)`)
 
 // NewPGDialect initializes a new PGDialect instance.
 func NewPGDialect(ctx context.Context, dsn string) (dialect.Dialect, error) {
@@ -161,7 +161,7 @@ func (d *PGDialect) ForeignKeys(ctx context.Context, tableName string) (dialect.
 
 	foreignKeys := make(dialect.ForeignKeys, len(results))
 	for i := range foreignKeys {
-		matches := fkReg.FindStringSubmatch(results[i].Condef)
+		matches := fkRegexp.FindStringSubmatch(results[i].Condef)
 
 		foreignKeys[i] = dialect.ForeignKey{
 			Name:                 results[i].Conname,

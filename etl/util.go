@@ -8,12 +8,36 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ulule/mover/config"
 )
+
+var sqlSelectRegexp = regexp.MustCompile(`^(?i)SELECT (?P<columns>.*[^T]) FROM (?P<table>\w+).*`)
+
+func getQueryTable(query string) string {
+	match := sqlSelectRegexp.FindStringSubmatch(query)
+	if match == nil {
+		return ""
+	}
+
+	captures := make(map[string]string)
+	for i, name := range sqlSelectRegexp.SubexpNames() {
+		if i == 0 {
+			continue
+		}
+		captures[name] = match[i]
+	}
+
+	if val, ok := captures["table"]; ok {
+		return val
+	}
+
+	return ""
+}
 
 func extractFilenames(schema config.Schema, rows entry) []string {
 	filenames := make([]string, 0)
