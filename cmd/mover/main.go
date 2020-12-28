@@ -23,6 +23,7 @@ var (
 
 func main() {
 	flag.StringVar(&query, "query", "", "query to execute")
+	flag.StringVar(&tableName, "table", "", "table name to export")
 	flag.StringVar(&path, "path", "", "directory output")
 	flag.StringVar(&dsn, "dsn", "", "database dsn")
 	flag.StringVar(&action, "action", "", "action to execute")
