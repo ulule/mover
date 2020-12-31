@@ -18,10 +18,10 @@ import (
 
 var sqlSelectRegexp = regexp.MustCompile(`^(?i)SELECT (?P<columns>.*[^T]) FROM (?P<table>\w+).*`)
 
-func getQueryTable(query string) string {
-	match := sqlSelectRegexp.FindStringSubmatch(query)
+func regexpNamedParams(reg *regexp.Regexp, value string) map[string]string {
+	match := reg.FindStringSubmatch(value)
 	if match == nil {
-		return ""
+		return nil
 	}
 
 	captures := make(map[string]string)
@@ -32,7 +32,13 @@ func getQueryTable(query string) string {
 		captures[name] = match[i]
 	}
 
-	if val, ok := captures["table"]; ok {
+	return captures
+}
+
+func getQueryTable(query string) string {
+	matches := regexpNamedParams(sqlSelectRegexp, query)
+
+	if val, ok := matches["table"]; ok {
 		return val
 	}
 
