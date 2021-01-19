@@ -34,7 +34,7 @@ type PGDialect struct {
 	conn *pgx.Conn
 }
 
-// CLose closes a connection.
+// Close closes a connection.
 func (d *PGDialect) Close(ctx context.Context) error {
 	return d.conn.Close(ctx)
 }
