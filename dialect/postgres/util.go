@@ -73,6 +73,12 @@ func valuesToPairs(table dialect.Table, data map[string]interface{}) ([]interfac
 					return nil, fmt.Errorf("unable to encode %v to pgtype.VarcharArray: %w", elements, err)
 				}
 				pairs[i] = lk.Pair(k, values)
+			case "jsonb":
+				b, err := json.Marshal(v)
+				if err != nil {
+					return nil, fmt.Errorf("unable to encode %v to JSON: %w", v, err)
+				}
+				pairs[i] = lk.Pair(k, &pgtype.JSONB{Bytes: b, Status: pgtype.Present})
 			default:
 				pairs[i] = lk.Pair(k, v)
 			}
