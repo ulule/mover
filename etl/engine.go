@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"os"
 	"path"
 	"strings"
 
@@ -156,7 +155,7 @@ func (e *Engine) extract(ctx context.Context, outputPath string, schema config.S
 	}
 
 	filePath := path.Join(outputPath, table.Name+extensionFormat)
-	if err := ioutil.WriteFile(filePath, output, os.ModePerm); err != nil {
+	if err := ioutil.WriteFile(filePath, output, 0644); err != nil {
 		return fmt.Errorf("unable to write JSON output to %s: %w", filePath, err)
 	}
 
