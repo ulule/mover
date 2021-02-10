@@ -37,11 +37,12 @@ type Column struct {
 }
 
 type Schema struct {
-	TableName     string        `json:"table_name"`
-	ReferenceKeys []string      `json:"reference_keys"`
-	Queries       []Query       `json:"queries"`
-	Columns       []Column      `json:"columns"`
-	Table         dialect.Table `json:"-"`
+	TableName         string        `json:"table_name"`
+	OmitReferenceKeys bool          `json:"omit_reference_keys"`
+	ReferenceKeys     []string      `json:"reference_keys"`
+	Queries           []Query       `json:"queries"`
+	Columns           []Column      `json:"columns"`
+	Table             dialect.Table `json:"-"`
 }
 
 type Config struct {

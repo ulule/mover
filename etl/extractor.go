@@ -36,7 +36,7 @@ func (e *extractor) handleReferenceKeys(ctx context.Context, depth int, table di
 		schema        = e.schema[table.Name]
 	)
 
-	if depth == 0 {
+	if depth == 0 && !schema.OmitReferenceKeys {
 		referenceKeys = table.ReferenceKeys
 	}
 
