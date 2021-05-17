@@ -6,8 +6,8 @@ require (
 	github.com/georgysavva/scany v0.2.7
 	github.com/jackc/pgtype v1.6.1
 	github.com/jackc/pgx/v4 v4.9.2
-	github.com/stretchr/testify v1.5.1
-	github.com/ulule/loukoum/v3 v3.3.0
+	github.com/stretchr/testify v1.7.0
+	github.com/ulule/loukoum/v3 v3.5.1-0.20210517081636-4790f61dc7e9
 	go.uber.org/zap v1.10.0
 	golang.org/x/crypto v0.0.0-20201117144127-c1f2f97bffc9 // indirect
 	golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9

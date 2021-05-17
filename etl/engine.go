@@ -116,7 +116,7 @@ func (e *Engine) Extract(ctx context.Context, outputPath, query string) error {
 
 	for i := range e.config.Extra {
 		tableName := e.config.Extra[i].TableName
-		query, _ := lk.Select("*").
+		query, _ := lk.Select(lk.Raw("*")).
 			From(tableName).Query()
 		cache, err = extractor.Handle(ctx, e.schema[tableName], query)
 		if err != nil {

@@ -105,9 +105,9 @@ func (d *PGDialect) ReferenceKeys(ctx context.Context, tableName string) (dialec
 
 	builder := lk.Select(
 		"conname",
-		"c2.relname AS table",
-		"(SELECT attname FROM pg_attribute WHERE attrelid = r.conrelid AND ARRAY[attnum] <@ r.conkey) AS column",
-	).From("pg_constraint r, pg_class c, pg_class c2").
+		lk.Raw("c2.relname AS table"),
+		lk.Raw("(SELECT attname FROM pg_attribute WHERE attrelid = r.conrelid AND ARRAY[attnum] <@ r.conkey) AS column"),
+	).From(lk.Raw("pg_constraint r, pg_class c, pg_class c2")).
 		Where(lk.Condition("r.confrelid").Equal(oid)).
 		And(lk.Raw("c.oid = r.confrelid")).
 		And(lk.Raw("c2.oid = r.conrelid")).
@@ -140,8 +140,8 @@ func (d *PGDialect) ForeignKeys(ctx context.Context, tableName string) (dialect.
 		return nil, err
 	}
 
-	builder := lk.Select("r.conname", "pg_catalog.pg_get_constraintdef(r.oid, true) AS condef").
-		From("pg_catalog.pg_constraint r, pg_namespace n, pg_class c").
+	builder := lk.Select("r.conname", lk.Raw("pg_catalog.pg_get_constraintdef(r.oid, true) AS condef")).
+		From(lk.Raw("pg_catalog.pg_constraint r, pg_namespace n, pg_class c")).
 		Where(lk.Condition("r.conrelid").Equal(oid)).
 		And(lk.Raw("r.contype = 'f'")).
 		And(lk.Raw("c.oid = confrelid")).
@@ -183,7 +183,7 @@ func (d *PGDialect) PrimaryKeyConstraint(ctx context.Context, tableName string) 
 	}
 
 	builder := lk.Select("conname").
-		From("pg_catalog.pg_constraint r").
+		From(lk.Table("pg_catalog.pg_constraint").As("r")).
 		Where(lk.Condition("r.conrelid").Equal(oid)).
 		And(lk.Raw("r.contype = 'p'")).
 		OrderBy(lk.Order("1"))
@@ -203,8 +203,11 @@ func (d *PGDialect) PrimaryKeys(ctx context.Context, tableName string) ([]dialec
 		return nil, err
 	}
 
-	builder := lk.Select("pg_attribute.attname AS name", "format_type(pg_attribute.atttypid, pg_attribute.atttypmod) AS data_type").
-		From("pg_index, pg_class, pg_attribute, pg_namespace").
+	builder := lk.Select(
+		lk.Raw("pg_attribute.attname AS name"),
+		lk.Raw("format_type(pg_attribute.atttypid, pg_attribute.atttypmod) AS data_type"),
+	).
+		From(lk.Raw("pg_index, pg_class, pg_attribute, pg_namespace")).
 		Where(lk.Condition("pg_class.oid").Equal(oid)).
 		And(lk.Raw("indrelid = pg_class.oid")).
 		And(lk.Raw("nspname = 'public'")).
@@ -239,21 +242,21 @@ func (d *PGDialect) PrimaryKeys(ctx context.Context, tableName string) ([]dialec
 // Columns returns sorted columns with types of a table.
 func (d *PGDialect) Columns(ctx context.Context, tableName string) ([]dialect.Column, error) {
 	builder := lk.Select(
-		"a.attname AS column_name",
-		"pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type",
-		`(
+		lk.Raw("a.attname AS column_name"),
+		lk.Raw("pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type"),
+		lk.Raw(`(
     SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid)
     FROM pg_catalog.pg_attrdef d
     WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum
     AND a.atthasdef
-  ) AS default`,
-		"a.attnotnull AS is_nullable",
-		"c.relname AS table_name",
-		"a.attnum as ordinal_position",
+  ) AS default`),
+		lk.Raw("a.attnotnull AS is_nullable"),
+		lk.Raw("c.relname AS table_name"),
+		lk.Raw("a.attnum as ordinal_position"),
 	).
-		From("pg_catalog.pg_attribute a").
-		Join("pg_catalog.pg_class c", lk.On("a.attrelid", "c.oid"), lk.LeftJoin).
-		Join("pg_catalog.pg_description pgd", lk.On("pgd.objoid = a.attrelid AND pgd.objsubid", "a.attnum"), lk.LeftJoin).
+		From(lk.Table("pg_catalog.pg_attribute").As("a")).
+		Join(lk.Table("pg_catalog.pg_class").As("c"), lk.On("a.attrelid", "c.oid"), lk.LeftJoin).
+		Join(lk.Table("pg_catalog.pg_description").As("pgd"), lk.AndOn(lk.On("pgd.objoid", "a.attrelid"), lk.On("pgd.objsubid", "a.attnum")), lk.LeftJoin).
 		Where(lk.Condition("a.attnum").GreaterThan(0)).
 		And(lk.Condition("a.attisdropped").Equal(false)).
 		OrderBy(lk.Order("a.attnum"))
@@ -330,8 +333,8 @@ func (d *PGDialect) Table(ctx context.Context, tableName string) (dialect.Table,
 // Tables returns all the tables from the database.
 func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 	builder := lk.Select("c.relname").
-		From("pg_catalog.pg_class c").
-		Join("pg_namespace n", lk.On("n.oid", "c.relnamespace")).
+		From(lk.Table("pg_catalog.pg_class").As("c")).
+		Join(lk.Table("pg_namespace").As("n"), lk.On("n.oid", "c.relnamespace")).
 		Where(lk.Raw("relkind = 'r'")).
 		And(lk.Condition("n.nspname").Equal("public")).
 		Comment("tables")
@@ -426,9 +429,9 @@ func (d *PGDialect) query(ctx context.Context, query string, args ...interface{}
 
 func (d *PGDialect) getTableOID(ctx context.Context, tableName string) (int64, error) {
 	builder := lk.Select("c.oid").
-		From("pg_catalog.pg_class c").
-		Join(lk.Table("pg_catalog.pg_namespace n"), lk.On("n.oid", "c.relnamespace"), lk.LeftJoin).
-		Where(lk.Condition("pg_catalog.pg_table_is_visible(c.oid)")).
+		From(lk.Table("pg_catalog.pg_class").As("c")).
+		Join(lk.Table("pg_catalog.pg_namespace").As("n"), lk.On("n.oid", "c.relnamespace"), lk.LeftJoin).
+		Where(lk.Raw("pg_catalog.pg_table_is_visible(c.oid)")).
 		And(lk.Condition("c.relname").Equal(tableName)).
 		And(lk.Raw("c.relkind IN ('r', 'v', 'm', 'f', 'p')")).
 		Comment("table oid")

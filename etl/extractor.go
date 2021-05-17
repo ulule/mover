@@ -52,7 +52,7 @@ func (e *extractor) handleReferenceKeys(ctx context.Context, depth int, table di
 		value := row[primaryKey.Name]
 		referenceKey := referenceKeys[i]
 
-		query, args := lk.Select("*").
+		query, args := lk.Select(lk.Raw("*")).
 			From(referenceKey.Table.Name).
 			Where(lk.Condition(referenceKey.ColumnName).Equal(value)).
 			Query()
@@ -100,7 +100,7 @@ func (e *extractor) handleRow(ctx context.Context, depth int, table dialect.Tabl
 		}
 
 		if foreignKey, ok := foreignKeys[k]; ok {
-			query, args := lk.Select("*").
+			query, args := lk.Select(lk.Raw("*")).
 				From(foreignKey.ReferencedTable.Name).
 				Where(lk.Condition(foreignKey.ReferencedColumnName).Equal(v)).
 				Query()
