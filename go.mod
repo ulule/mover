@@ -9,8 +9,7 @@ require (
 	github.com/stretchr/testify v1.7.0
 	github.com/ulule/loukoum/v3 v3.5.1-0.20210517081636-4790f61dc7e9
 	go.uber.org/zap v1.10.0
-	golang.org/x/crypto v0.0.0-20201117144127-c1f2f97bffc9 // indirect
-	golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9
-	golang.org/x/text v0.3.4 // indirect
+	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4
+	golang.org/x/text v0.3.8 // indirect
 	syreclabs.com/go/faker v1.2.3
 )
