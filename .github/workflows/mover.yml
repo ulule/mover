@@ -1,71 +1,33 @@
-name: Mover
+name: goreleaser
 
 on:
   push:
-    # branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    # run only against tags
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+  # packages: write
+  # issues: write
 
 jobs:
-
-  linter:
-    timeout-minutes: 30
+  goreleaser:
     runs-on: ubuntu-latest
-    env:
-      GO_VERSION: 1.15
-      GOLINT_VERSION: 1.51.2
-
     steps:
-      - name: Checking out repository
-        uses: actions/checkout@v3
-
-      - name: Setting up Go environment
-        uses: actions/setup-go@v3
+      - uses: actions/checkout@v3
         with:
-          go-version: '^${{ env.GO_VERSION }}'
-          cache: true
-          cache-dependency-path: go.sum
-
-      - name: Download gomod dependencies
-        run: go mod download -x
-
-      - name: Run linters
-        uses: golangci/golangci-lint-action@v3
+          fetch-depth: 0
+      - run: git fetch --force --tags
+      - uses: actions/setup-go@v4
         with:
-          version: v${{ env.GOLINT_VERSION }}
-          args: -v -c .golangci.yml --timeout 10m
-          # skip-cache: true
-          # skip-pkg-cache: true
-          # skip-build-cache: true
+          go-version: stable
 
-  build:
-    timeout-minutes: 30
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checking out repository
-        uses: actions/checkout@v3
-
-      - name: Login to GCR
-        uses: docker/login-action@v2
+      - uses: goreleaser/goreleaser-action@v4
         with:
-          registry: ${{ vars.REGISTRY }}
-          username: _json_key
-          password: ${{ secrets.GCR_JSON_KEY }}
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v2
-        with:
-          username: ulule
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Build app and push
-        uses: docker/build-push-action@v4
-        with:
-          push: true
-          tags: ${{ vars.REGISTRY }}/mover:${{ github.sha }},${{ vars.REGISTRY }}/mover:latest
-          cache-from: type=registry,ref=${{ vars.REGISTRY }}/mover:cache
-          cache-to: type=registry,ref=${{ vars.REGISTRY }}/mover:cache,mode=max
+          # either 'goreleaser' (default) or 'goreleaser-pro':
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
