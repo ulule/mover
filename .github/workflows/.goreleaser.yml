@@ -1,9 +1,0 @@
-# .goreleaser.yaml
-builds:
-    main: ./cmd/mover/
-
-    goos:
-      - linux
-      
-    goarch:
-      - amd64
