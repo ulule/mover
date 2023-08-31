@@ -1,6 +1,6 @@
 # .goreleaser.yaml
 builds:
-    main: ./cmd/mover/
+  - main: ./cmd/mover/
 
     goos:
       - linux
