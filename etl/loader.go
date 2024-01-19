@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,7 +58,7 @@ func (l *loader) loadFile(ctx context.Context, filePath string) error {
 	}
 	defer file.Close()
 
-	content, err := ioutil.ReadAll(file)
+	content, err := io.ReadAll(file)
 	if err != nil {
 		return fmt.Errorf("unable to read file %s: %w", filePath, err)
 	}

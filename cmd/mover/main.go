@@ -39,7 +39,7 @@ func main() {
 	} else {
 		logger, _ = zap.NewProduction()
 	}
-	// nolint:errcheck
+	//nolint:errcheck
 	defer logger.Sync()
 
 	var cfg config.Config

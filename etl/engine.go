@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path"
 	"strings"
 
@@ -114,19 +114,19 @@ func (e *Engine) Extract(ctx context.Context, outputPath, query string) error {
 		return fmt.Errorf("unable to extract %s (query %s): %w", tableName, query, err)
 	}
 
+	for tableName := range cache {
+		if err := e.extract(ctx, outputPath, e.schema[tableName], cache[tableName]); err != nil {
+			return fmt.Errorf("unable to extract rows from table %s: %w", tableName, err)
+		}
+	}
+
 	for i := range e.config.Extra {
 		tableName := e.config.Extra[i].TableName
 		query, _ := lk.Select(lk.Raw("*")).
 			From(tableName).Query()
-		cache, err = extractor.Handle(ctx, e.schema[tableName], query)
+		_, err = extractor.Handle(ctx, e.schema[tableName], query)
 		if err != nil {
 			return fmt.Errorf("unable to extract %s (query %s): %w", tableName, query, err)
-		}
-	}
-
-	for tableName := range cache {
-		if err := e.extract(ctx, outputPath, e.schema[tableName], cache[tableName]); err != nil {
-			return fmt.Errorf("unable to extract rows from table %s: %w", tableName, err)
 		}
 	}
 
@@ -155,7 +155,7 @@ func (e *Engine) extract(ctx context.Context, outputPath string, schema config.S
 	}
 
 	filePath := path.Join(outputPath, table.Name+extensionFormat)
-	if err := ioutil.WriteFile(filePath, output, 0644); err != nil {
+	if err := os.WriteFile(filePath, output, 0644); err != nil {
 		return fmt.Errorf("unable to write JSON output to %s: %w", filePath, err)
 	}
 
