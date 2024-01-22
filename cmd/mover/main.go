@@ -18,6 +18,7 @@ var (
 	path      string
 	dsn       string
 	verbose   bool
+	version   bool
 	action    string
 )
 
@@ -28,7 +29,13 @@ func main() {
 	flag.StringVar(&dsn, "dsn", "", "database dsn")
 	flag.StringVar(&action, "action", "", "action to execute")
 	flag.BoolVar(&verbose, "verbose", false, "verbose logs")
+	flag.BoolVar(&version, "version", false, "show version")
 	flag.Parse()
+
+	if version {
+		fmt.Println("mover version", etl.Version)
+		return
+	}
 
 	var (
 		ctx    = context.Background()
