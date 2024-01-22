@@ -471,7 +471,7 @@ func (d *PGDialect) insert(ctx context.Context, table dialect.Table, data map[st
 
 	query, args := lk.Insert(table.Name).
 		Set(pairs...).
-		OnConflict(table.PrimaryKeyColumnName(), lk.DoUpdate(pairs...)).
+		OnConflict(table.PrimaryKeyColumnName(), lk.DoNothing()).
 		Query()
 	if err := d.exec(ctx, query, args...); err != nil {
 		return fmt.Errorf("unable to insert %v+ to %s:%w", pairs, table.Name, err)

@@ -58,7 +58,9 @@ func (e *extractor) handleReferenceKeys(ctx context.Context, depth int, table di
 			Query()
 
 		e.logger.Debug(depthF(depth+1, "Fetch reference key"),
-			zap.String("reference_key", fmt.Sprintf("%s = %v", referenceKey, value)))
+			zap.String("reference_key", fmt.Sprintf("%s = %v", referenceKey, value)),
+			zap.String("table_name", table.Name),
+		)
 
 		if _, err := e.handle(ctx, depth+2, e.schema[referenceKey.Table.Name], query, args...); err != nil {
 			return fmt.Errorf("unable to handle table %s (query: %s, args: %v): %w", referenceKey.Table.Name, query, args, err)
