@@ -114,19 +114,19 @@ func (e *Engine) Extract(ctx context.Context, outputPath, query string) error {
 		return fmt.Errorf("unable to extract %s (query %s): %w", tableName, query, err)
 	}
 
-	for tableName := range cache {
-		if err := e.extract(ctx, outputPath, e.schema[tableName], cache[tableName]); err != nil {
-			return fmt.Errorf("unable to extract rows from table %s: %w", tableName, err)
-		}
-	}
-
 	for i := range e.config.Extra {
 		tableName := e.config.Extra[i].TableName
 		query, _ := lk.Select(lk.Raw("*")).
 			From(tableName).Query()
-		_, err = extractor.Handle(ctx, e.schema[tableName], query)
+		cache, err = extractor.Handle(ctx, e.schema[tableName], query)
 		if err != nil {
 			return fmt.Errorf("unable to extract %s (query %s): %w", tableName, query, err)
+		}
+	}
+
+	for tableName := range cache {
+		if err := e.extract(ctx, outputPath, e.schema[tableName], cache[tableName]); err != nil {
+			return fmt.Errorf("unable to extract rows from table %s: %w", tableName, err)
 		}
 	}
 
