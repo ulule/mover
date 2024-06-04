@@ -187,10 +187,11 @@ func (e *Engine) newLoader() *loader {
 
 func (e *Engine) newExtractor() *extractor {
 	return &extractor{
-		extract: make(extract),
-		schema:  e.schema,
-		dialect: e.dialect,
-		logger:  e.logger,
+		extract:            make(extract),
+		schema:             e.schema,
+		dialect:            e.dialect,
+		logger:             e.logger,
+		processedRelations: make(map[string]struct{}),
 	}
 }
 
