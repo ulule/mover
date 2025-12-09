@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4"
@@ -125,6 +126,15 @@ func marshalRows(rows pgx.Rows) (map[string]interface{}, error) {
 			results[k] = v.String()
 		case pgtype.VarcharArray:
 			var values []string
+			if v.Elements != nil {
+				if err := v.AssignTo(&values); err != nil {
+					return nil, fmt.Errorf("unable to decode %v+: %w", v, err)
+				}
+			}
+
+			results[k] = values
+		case pgtype.TimestampArray:
+			var values []time.Time
 			if v.Elements != nil {
 				if err := v.AssignTo(&values); err != nil {
 					return nil, fmt.Errorf("unable to decode %v+: %w", v, err)
