@@ -74,6 +74,20 @@ func valuesToPairs(table dialect.Table, data map[string]interface{}) ([]interfac
 					return nil, fmt.Errorf("unable to encode %v to pgtype.VarcharArray: %w", elements, err)
 				}
 				pairs[i] = lk.Pair(k, values)
+			case "timestamp without time zone[]":
+				elements := make([]time.Time, len(v))
+				for i := range v {
+					t, err := time.Parse(time.RFC3339, v[i].(string))
+					if err != nil {
+						return nil, fmt.Errorf("unable to parse %v to time.Time: %w", v[i], err)
+					}
+					elements[i] = t
+				}
+				values := &pgtype.TimestampArray{}
+				if err := values.Set(elements); err != nil {
+					return nil, fmt.Errorf("unable to encode %v to pgtype.TimestampArray: %w", elements, err)
+				}
+				pairs[i] = lk.Pair(k, values)
 			case "jsonb":
 				b, err := json.Marshal(v)
 				if err != nil {
