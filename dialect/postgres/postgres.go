@@ -255,7 +255,6 @@ func (d *PGDialect) Columns(ctx context.Context, tableName string) ([]dialect.Co
 	).
 		From(lk.Table("pg_catalog.pg_attribute").As("a")).
 		Join(lk.Table("pg_catalog.pg_class").As("c"), lk.On("a.attrelid", "c.oid"), lk.LeftJoin).
-		Join(lk.Table("pg_catalog.pg_description").As("pgd"), lk.AndOn(lk.On("pgd.objoid", "a.attrelid"), lk.On("pgd.objsubid", "a.attnum")), lk.LeftJoin).
 		Where(lk.Condition("a.attnum").GreaterThan(0)).
 		And(lk.Condition("a.attisdropped").Equal(false)).
 		OrderBy(lk.Order("a.attnum"))
@@ -267,6 +266,11 @@ func (d *PGDialect) Columns(ctx context.Context, tableName string) ([]dialect.Co
 		}
 
 		builder = builder.Where(lk.Condition("a.attrelid").Equal(oid))
+	} else {
+		builder = builder.
+			Join(lk.Table("pg_catalog.pg_namespace").As("n"), lk.On("n.oid", "c.relnamespace")).
+			And(lk.Condition("n.nspname").Equal("public")).
+			And(lk.Raw("c.relkind = 'r'"))
 	}
 
 	query, args := builder.Query()
@@ -329,7 +333,7 @@ func (d *PGDialect) Table(ctx context.Context, tableName string) (dialect.Table,
 	return table, nil
 }
 
-// Tables returns all the tables from the database.
+// Tables returns all the tables from the database. It runs 4 queries, whatever the number of tables.
 func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 	builder := lk.Select("c.relname").
 		From(lk.Table("pg_catalog.pg_class").As("c")).
@@ -353,33 +357,39 @@ func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 	sortedColumns := make(map[string]dialect.Columns)
 	for i := range columns {
 		tableName := columns[i].TableName
-		_, ok := sortedColumns[tableName]
-		if !ok {
-			sortedColumns[tableName] = make(dialect.Columns, 0)
-		}
 		sortedColumns[tableName] = append(sortedColumns[tableName], columns[i])
+	}
+
+	foreignKeys, referenceKeys, err := d.allForeignKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	primaryKeys, err := d.allPrimaryKeys(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	tables := make(dialect.Tables, len(tableNames))
 	for i := range tableNames {
-		sort.Sort(sortedColumns[tableNames[i]])
+		name := tableNames[i]
+		sort.Sort(sortedColumns[name])
+
 		tables[i] = dialect.Table{
-			Name:    tableNames[i],
-			Columns: sortedColumns[tableNames[i]],
+			Name:          name,
+			Columns:       sortedColumns[name],
+			PrimaryKeys:   primaryKeys[name],
+			ForeignKeys:   foreignKeys[name],
+			ReferenceKeys: referenceKeys[name],
 		}
-		tables[i].ReferenceKeys, err = d.ReferenceKeys(ctx, tableNames[i])
-		if err != nil {
-			return nil, err
+		if tables[i].PrimaryKeys == nil {
+			tables[i].PrimaryKeys = make([]dialect.PrimaryKey, 0)
 		}
-
-		tables[i].ForeignKeys, err = d.ForeignKeys(ctx, tableNames[i])
-		if err != nil {
-			return nil, err
+		if tables[i].ForeignKeys == nil {
+			tables[i].ForeignKeys = make(dialect.ForeignKeys, 0)
 		}
-
-		tables[i].PrimaryKeys, err = d.PrimaryKeys(ctx, tableNames[i])
-		if err != nil {
-			return nil, err
+		if tables[i].ReferenceKeys == nil {
+			tables[i].ReferenceKeys = make(dialect.ReferenceKeys, 0)
 		}
 	}
 
@@ -399,6 +409,96 @@ func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 	}
 
 	return tables, nil
+}
+
+// allForeignKeys returns, in a single query, the foreign keys and the reference keys of all the tables of the public
+// schema, indexed by table name. Constraints with a table outside of the public schema are ignored, and for a
+// multi-column constraint the reference key only contains the first column.
+func (d *PGDialect) allForeignKeys(ctx context.Context) (fks map[string]dialect.ForeignKeys, refs map[string]dialect.ReferenceKeys, err error) {
+	query := `SELECT r.conname,
+       child.relname  AS child_table,
+       parent.relname AS parent_table,
+       pg_catalog.pg_get_constraintdef(r.oid, true) AS condef,
+       (SELECT a.attname FROM pg_attribute a
+         WHERE a.attrelid = r.conrelid AND a.attnum = r.conkey[1]) AS child_column
+FROM pg_catalog.pg_constraint r
+JOIN pg_catalog.pg_class child      ON child.oid = r.conrelid
+JOIN pg_catalog.pg_namespace cn     ON cn.oid = child.relnamespace
+JOIN pg_catalog.pg_class parent     ON parent.oid = r.confrelid
+JOIN pg_catalog.pg_namespace pn     ON pn.oid = parent.relnamespace
+WHERE r.contype = 'f' AND cn.nspname = 'public' AND pn.nspname = 'public'
+ORDER BY child.relname, r.conname`
+
+	var results []struct {
+		Conname     string `db:"conname"`
+		ChildTable  string `db:"child_table"`
+		ParentTable string `db:"parent_table"`
+		Condef      string `db:"condef"`
+		ChildColumn string `db:"child_column"`
+	}
+
+	if err := d.execQuery(ctx, &results, query); err != nil {
+		return nil, nil, fmt.Errorf("unable to retrieve foreign keys: %w", err)
+	}
+
+	foreignKeys := make(map[string]dialect.ForeignKeys)
+	referenceKeys := make(map[string]dialect.ReferenceKeys)
+	for i := range results {
+		matches := fkRegexp.FindStringSubmatch(results[i].Condef)
+		if matches == nil {
+			return nil, nil, fmt.Errorf("unable to parse foreign key definition %s", results[i].Condef)
+		}
+
+		foreignKeys[results[i].ChildTable] = append(foreignKeys[results[i].ChildTable], dialect.ForeignKey{
+			Name:                 results[i].Conname,
+			Definition:           results[i].Condef,
+			ColumnName:           matches[1],
+			ReferencedTableName:  matches[3],
+			ReferencedColumnName: matches[4],
+		})
+
+		referenceKeys[results[i].ParentTable] = append(referenceKeys[results[i].ParentTable], dialect.ReferenceKey{
+			Name:       results[i].Conname,
+			TableName:  results[i].ChildTable,
+			ColumnName: results[i].ChildColumn,
+		})
+	}
+
+	return foreignKeys, referenceKeys, nil
+}
+
+// allPrimaryKeys returns, in a single query, the primary keys of all the tables of the public schema, indexed by
+// table name and ordered as in the index.
+func (d *PGDialect) allPrimaryKeys(ctx context.Context) (map[string][]dialect.PrimaryKey, error) {
+	query := `SELECT c.relname AS table_name, a.attname AS name,
+       format_type(a.atttypid, a.atttypmod) AS data_type
+FROM pg_index i
+JOIN pg_class c      ON c.oid = i.indrelid
+JOIN pg_namespace n  ON n.oid = c.relnamespace
+JOIN pg_attribute a  ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+WHERE i.indisprimary AND n.nspname = 'public'
+ORDER BY c.relname, array_position(i.indkey::int2[], a.attnum)`
+
+	var results []struct {
+		TableName string `db:"table_name"`
+		Name      string `db:"name"`
+		DataType  string `db:"data_type"`
+	}
+
+	if err := d.execQuery(ctx, &results, query); err != nil {
+		return nil, fmt.Errorf("unable to retrieve primary keys: %w", err)
+	}
+
+	primaryKeys := make(map[string][]dialect.PrimaryKey)
+	for i := range results {
+		primaryKeys[results[i].TableName] = append(primaryKeys[results[i].TableName], dialect.PrimaryKey{
+			Name:      results[i].Name,
+			DataType:  results[i].DataType,
+			TableName: results[i].TableName,
+		})
+	}
+
+	return primaryKeys, nil
 }
 
 func (d *PGDialect) execQuery(ctx context.Context, result interface{}, query string, args ...interface{}) error {
