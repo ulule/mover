@@ -109,8 +109,7 @@ func (e *Engine) Extract(ctx context.Context, outputPath, query string) error {
 		return fmt.Errorf("unable to retrieve table from query: %s", query)
 	}
 
-	cache, err := extractor.Handle(ctx, e.schema[tableName], query)
-	if err != nil {
+	if err := extractor.Handle(ctx, e.schema[tableName], query); err != nil {
 		return fmt.Errorf("unable to extract %s (query %s): %w", tableName, query, err)
 	}
 
@@ -118,14 +117,15 @@ func (e *Engine) Extract(ctx context.Context, outputPath, query string) error {
 		tableName := e.config.Extra[i].TableName
 		query, _ := lk.Select(lk.Raw("*")).
 			From(tableName).Query()
-		cache, err = extractor.Handle(ctx, e.schema[tableName], query)
-		if err != nil {
+		if err := extractor.Handle(ctx, e.schema[tableName], query); err != nil {
 			return fmt.Errorf("unable to extract %s (query %s): %w", tableName, query, err)
 		}
 	}
 
-	for tableName := range cache {
-		if err := e.extract(ctx, outputPath, e.schema[tableName], cache[tableName]); err != nil {
+	extractor.logSummary()
+
+	for tableName := range extractor.extract {
+		if err := e.extract(ctx, outputPath, e.schema[tableName], extractor.extract[tableName]); err != nil {
 			return fmt.Errorf("unable to extract rows from table %s: %w", tableName, err)
 		}
 	}
@@ -187,11 +187,12 @@ func (e *Engine) newLoader() *loader {
 
 func (e *Engine) newExtractor() *extractor {
 	return &extractor{
-		extract:            make(extract),
-		schema:             e.schema,
-		dialect:            e.dialect,
-		logger:             e.logger,
-		processedRelations: make(map[string]struct{}),
+		extract:   make(extract),
+		schema:    e.schema,
+		dialect:   e.dialect,
+		logger:    e.logger,
+		processed: make(map[string]struct{}),
+		fetched:   make(map[fetchKey]map[string]struct{}),
 	}
 }
 

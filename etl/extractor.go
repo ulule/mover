@@ -3,9 +3,8 @@ package etl
 import (
 	"context"
 	"fmt"
-	"strings"
+	"sort"
 
-	lk "github.com/ulule/loukoum/v3"
 	"go.uber.org/zap"
 
 	"github.com/ulule/mover/config"
@@ -16,134 +15,152 @@ type (
 	resultSet []map[string]interface{}
 	extract   map[string]entry
 	entry     map[string]resultSet
+	// fetchKey identifies a column of a table to look values up in.
+	fetchKey struct{ table, column string }
+	// rawQuery is a query from the configuration, executed as is.
+	rawQuery struct{ table, query string }
+	// pending contains what the next level has to fetch.
+	pending struct {
+		in  map[fetchKey][]interface{}
+		raw []rawQuery
+		// rawSeen avoids executing twice the same query in a level.
+		rawSeen map[rawQuery]struct{}
+	}
 	extractor struct {
-		extract            extract
-		dialect            dialect.Dialect
-		schema             map[string]config.Schema
-		logger             *zap.Logger
-		processedRelations map[string]struct{}
+		extract   extract
+		dialect   dialect.Dialect
+		schema    map[string]config.Schema
+		logger    *zap.Logger
+		processed map[string]struct{}
+		// fetched contains the values already requested, by table and column.
+		fetched map[fetchKey]map[string]struct{}
+		// queries counts the calls to the dialect.
+		queries int
+		batches int
 	}
 )
 
-func depthF(depth int, msg string) string {
-	return strings.Repeat("\t", depth+1) + msg
+func newPending() *pending {
+	return &pending{
+		in:      make(map[fetchKey][]interface{}),
+		rawSeen: make(map[rawQuery]struct{}),
+	}
 }
 
-func (e *extractor) handleReferenceKeys(ctx context.Context, depth int, table dialect.Table, row map[string]interface{}) error {
+func (p *pending) empty() bool {
+	return len(p.in) == 0 && len(p.raw) == 0
+}
+
+// keys returns the fetch keys in a deterministic order.
+func (p *pending) keys() []fetchKey {
+	keys := make([]fetchKey, 0, len(p.in))
+	for key := range p.in {
+		keys = append(keys, key)
+	}
+
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].table != keys[j].table {
+			return keys[i].table < keys[j].table
+		}
+
+		return keys[i].column < keys[j].column
+	})
+
+	return keys
+}
+
+// request adds a value to look up at the next level, unless it has already been requested.
+func (e *extractor) request(next *pending, key fetchKey, value interface{}) {
+	id := fmt.Sprintf("%v", value)
+
+	values, ok := e.fetched[key]
+	if !ok {
+		values = make(map[string]struct{})
+		e.fetched[key] = values
+	}
+
+	if _, ok := values[id]; ok {
+		return
+	}
+
+	values[id] = struct{}{}
+	next.in[key] = append(next.in[key], value)
+}
+
+// visit applies the relations rules to rows of a table, and accumulates in next what has to be fetched.
+func (e *extractor) visit(rows resultSet, table dialect.Table, root bool, next *pending) {
 	var (
-		referenceKeys = make(dialect.ReferenceKeys, 0)
-		primaryKeys   = table.PrimaryKeys
-		primaryKey    = primaryKeys[0]
 		schema        = e.schema[table.Name]
-	)
-
-	if depth == 0 && !schema.OmitReferenceKeys {
-		referenceKeys = table.ReferenceKeys
-	}
-
-	for _, referenceKey := range schema.ReferenceKeys {
-		for j := range table.ReferenceKeys {
-			if referenceKey == table.ReferenceKeys[j].Name {
-				referenceKeys = append(referenceKeys, table.ReferenceKeys[j])
-			}
-		}
-	}
-
-	for i := range referenceKeys {
-		value := row[primaryKey.Name]
-		referenceKey := referenceKeys[i]
-
-		query, args := lk.Select(lk.Raw("*")).
-			From(referenceKey.Table.Name).
-			Where(lk.Condition(referenceKey.ColumnName).Equal(value)).
-			Query()
-
-		e.logger.Debug(depthF(depth+1, fmt.Sprintf("Fetch reference key %s = %v", referenceKey, value)),
-			zap.String("table_name", table.Name),
-		)
-
-		if _, err := e.handle(ctx, depth+2, e.schema[referenceKey.Table.Name], query, args...); err != nil {
-			return fmt.Errorf("unable to handle table %s (query: %s, args: %v): %w", referenceKey.Table.Name, query, args, err)
-		}
-	}
-
-	for i := range schema.Queries {
-		query := schema.Queries[i]
-		exec := replaceVar(query.Query, row)
-		e.logger.Debug(depthF(depth+1, "Execute query"),
-			zap.String("query", exec))
-
-		if _, err := e.handle(ctx, depth+1, e.schema[query.Table.Name], exec); err != nil {
-			return fmt.Errorf("unable to handle table %s (query %s): %w", query.Table.Name, exec, err)
-		}
-	}
-
-	return nil
-}
-
-func (e *extractor) handleRow(ctx context.Context, depth int, table dialect.Table, row map[string]interface{}) error {
-	var (
-		primaryKeys = table.PrimaryKeys
-		foreignKeys = make(map[string]dialect.ForeignKey, len(table.ForeignKeys))
+		primaryKey    = table.PrimaryKeys[0]
+		foreignKeys   = make(map[string]dialect.ForeignKey, len(table.ForeignKeys))
+		referenceKeys = make(dialect.ReferenceKeys, 0)
 	)
 
 	for i := range table.ForeignKeys {
 		foreignKeys[table.ForeignKeys[i].ColumnName] = table.ForeignKeys[i]
 	}
 
-	primaryKey := primaryKeys[0]
-
-	relationKey := fmt.Sprintf("%s = %v", primaryKey, row[primaryKey.Name])
-
-	if _, ok := e.processedRelations[relationKey]; ok {
-		e.logger.Debug(depthF(depth, fmt.Sprintf("Relation %s already processed", relationKey)))
-		return nil
+	if root && !schema.OmitReferenceKeys {
+		referenceKeys = append(referenceKeys, table.ReferenceKeys...)
 	}
 
-	e.processedRelations[relationKey] = struct{}{}
-	e.logger.Debug(depthF(depth, fmt.Sprintf("Retrieve relation %s", relationKey)))
+	for _, name := range schema.ReferenceKeys {
+		for j := range table.ReferenceKeys {
+			if name == table.ReferenceKeys[j].Name {
+				referenceKeys = append(referenceKeys, table.ReferenceKeys[j])
+			}
+		}
+	}
 
-	for k, v := range row {
-		if v == nil {
+	for _, row := range rows {
+		relationKey := fmt.Sprintf("%s = %v", primaryKey, row[primaryKey.Name])
+		if _, ok := e.processed[relationKey]; ok {
 			continue
 		}
 
-		if foreignKey, ok := foreignKeys[k]; ok {
-			foreignRelationKey := fmt.Sprintf("%s = %v", foreignKey, v)
+		e.processed[relationKey] = struct{}{}
 
-			if _, ok := e.processedRelations[foreignRelationKey]; ok {
-				e.logger.Debug(depthF(depth, fmt.Sprintf("Foreign relation %s already processed", foreignRelationKey)))
+		for i := range table.ForeignKeys {
+			foreignKey := foreignKeys[table.ForeignKeys[i].ColumnName]
+
+			v := row[foreignKey.ColumnName]
+			if v == nil {
 				continue
 			}
 
-			e.logger.Debug(depthF(depth+1, fmt.Sprintf("Fetch foreign key %s = %v", foreignKey, v)))
-			query, args := lk.Select(lk.Raw("*")).
-				From(foreignKey.ReferencedTable.Name).
-				Where(lk.Condition(foreignKey.ReferencedColumnName).Equal(v)).
-				Query()
-
-			if _, err := e.handle(ctx, depth+2, e.schema[foreignKey.ReferencedTable.Name], query, args...); err != nil {
-				return fmt.Errorf("unable to handle table %s from foreign key %s: %w", foreignKey.ReferencedTable.Name, foreignKey.Name, err)
+			if _, ok := e.processed[fmt.Sprintf("%s = %v", foreignKey, v)]; ok {
+				continue
 			}
+
+			e.request(next, fetchKey{foreignKey.ReferencedTable.Name, foreignKey.ReferencedColumnName}, v)
+		}
+
+		for i := range referenceKeys {
+			e.request(next, fetchKey{referenceKeys[i].Table.Name, referenceKeys[i].ColumnName}, row[primaryKey.Name])
+		}
+
+		for i := range schema.Queries {
+			raw := rawQuery{
+				table: schema.Queries[i].Table.Name,
+				query: replaceVar(schema.Queries[i].Query, row),
+			}
+
+			if _, ok := next.rawSeen[raw]; ok {
+				continue
+			}
+
+			next.rawSeen[raw] = struct{}{}
+			next.raw = append(next.raw, raw)
 		}
 	}
-
-	if err := e.handleReferenceKeys(ctx, depth, table, row); err != nil {
-		return err
-	}
-
-	return nil
 }
 
-func (e *extractor) Handle(ctx context.Context, schema config.Schema, query string, args ...interface{}) (extract, error) {
-	return e.handle(ctx, 0, schema, query, args...)
-}
-
-func (e *extractor) handle(ctx context.Context, depth int, schema config.Schema, query string, args ...interface{}) (extract, error) {
+// Handle executes the query as a root, then extracts the relations level by level.
+func (e *extractor) Handle(ctx context.Context, schema config.Schema, query string, args ...interface{}) error {
 	var (
 		table     = schema.Table
 		tableName = table.Name
-		cacheKey  = cacheKey(query, args)
+		cacheKey  = cacheKey(query, args...)
 	)
 
 	if _, ok := e.extract[tableName]; !ok {
@@ -151,24 +168,113 @@ func (e *extractor) handle(ctx context.Context, depth int, schema config.Schema,
 	}
 
 	if _, ok := e.extract[tableName][cacheKey]; ok {
-		e.logger.Debug(depthF(depth, "Already cached"))
-		return nil, nil
+		e.logger.Debug("Already cached", zap.String("table", tableName))
+		return nil
 	}
 
 	results, err := e.dialect.ResultSet(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve results: %w", err)
+		return fmt.Errorf("unable to retrieve results: %w", err)
 	}
 
-	e.logger.Debug(depthF(depth, fmt.Sprintf("-> %d results", len(results))))
-
+	e.queries++
 	e.extract[tableName][cacheKey] = results
 
-	for i := range results {
-		if err := e.handleRow(ctx, depth, table, results[i]); err != nil {
-			return nil, fmt.Errorf("unable to handle row %v from table %s: %w", table, results[i], err)
+	e.logger.Debug("Root query", zap.String("table", tableName), zap.Int("rows", len(results)))
+
+	next := newPending()
+	e.visit(results, table, true, next)
+
+	for level := 1; !next.empty(); level++ {
+		var err error
+
+		if next, err = e.fetchLevel(ctx, level, next); err != nil {
+			return err
 		}
 	}
 
-	return e.extract, nil
+	return nil
+}
+
+// fetchLevel fetches what is pending and returns what the next level has to fetch.
+func (e *extractor) fetchLevel(ctx context.Context, level int, current *pending) (*pending, error) {
+	next := newPending()
+
+	for _, key := range current.keys() {
+		var (
+			values = current.in[key]
+			table  = e.schema[key.table].Table
+		)
+
+		rows, err := e.dialect.SelectIn(ctx, table, key.column, values)
+		if err != nil {
+			return nil, fmt.Errorf("unable to handle table %s from column %s: %w", key.table, key.column, err)
+		}
+
+		e.queries++
+		e.batches++
+
+		if _, ok := e.extract[key.table]; !ok {
+			e.extract[key.table] = make(entry)
+		}
+
+		e.extract[key.table][fmt.Sprintf("%s.%s IN batch#%d", key.table, key.column, e.batches)] = rows
+
+		e.logger.Debug("Fetch level",
+			zap.Int("level", level),
+			zap.String("table", key.table),
+			zap.String("column", key.column),
+			zap.Int("values", len(values)),
+			zap.Int("rows", len(rows)))
+
+		e.visit(rows, table, false, next)
+	}
+
+	for _, raw := range current.raw {
+		var (
+			table    = e.schema[raw.table].Table
+			cacheKey = cacheKey(raw.query)
+		)
+
+		if _, ok := e.extract[raw.table]; !ok {
+			e.extract[raw.table] = make(entry)
+		}
+
+		if _, ok := e.extract[raw.table][cacheKey]; ok {
+			e.logger.Debug("Already cached", zap.String("table", raw.table))
+			continue
+		}
+
+		rows, err := e.dialect.ResultSet(ctx, raw.query)
+		if err != nil {
+			return nil, fmt.Errorf("unable to handle table %s (query %s): %w", raw.table, raw.query, err)
+		}
+
+		e.queries++
+		e.extract[raw.table][cacheKey] = rows
+
+		e.logger.Debug("Execute query",
+			zap.Int("level", level),
+			zap.String("table", raw.table),
+			zap.String("query", raw.query),
+			zap.Int("rows", len(rows)))
+
+		e.visit(rows, table, false, next)
+	}
+
+	return next, nil
+}
+
+// logSummary logs the number of queries and of rows by table.
+func (e *extractor) logSummary() {
+	rows := make(map[string]int, len(e.extract))
+	for tableName := range e.extract {
+		for _, results := range e.extract[tableName] {
+			rows[tableName] += len(results)
+		}
+	}
+
+	e.logger.Info("Extraction done",
+		zap.Int("queries", e.queries),
+		zap.Any("rows", rows))
 }

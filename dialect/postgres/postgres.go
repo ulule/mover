@@ -7,10 +7,10 @@ import (
 	"regexp"
 	"sort"
 
-	"github.com/georgysavva/scany/pgxscan"
-	"github.com/jackc/pgtype"
-	"github.com/jackc/pgx/v4"
+	"github.com/georgysavva/scany/v2/pgxscan"
+	"github.com/jackc/pgx/v5"
 	lk "github.com/ulule/loukoum/v3"
+	"github.com/ulule/loukoum/v3/types"
 
 	"github.com/ulule/mover/dialect"
 )
@@ -59,24 +59,116 @@ func (d *PGDialect) ResultSet(ctx context.Context, query string, args ...interfa
 	return results, nil
 }
 
-// BulkInsert inserts multiple data a single database transaction. It disables triggers to avoid conflicts on
-// foreign constraints.
-func (d *PGDialect) BulkInsert(ctx context.Context, table dialect.Table, data []map[string]interface{}) error {
-	var err error
+// selectInBatchSize is the maximum number of values sent in a single SelectIn query.
+const selectInBatchSize = 1000
 
+// selectInQuery returns the query of SelectIn. The data type comes from format_type, so it is not quoted.
+func selectInQuery(tableName, column, dataType string) string {
+	return fmt.Sprintf("SELECT * FROM %s WHERE %s = ANY($1::text[]::%s[])",
+		pgx.Identifier{tableName}.Sanitize(), pgx.Identifier{column}.Sanitize(), dataType)
+}
+
+// SelectIn returns the rows of a table whose column is one of the values. Keys of a known type are sent as a single
+// text array cast to the column type, so the planner can still use an index on the column. Other types fall back to
+// one query by value.
+func (d *PGDialect) SelectIn(ctx context.Context, table dialect.Table, column string, values []interface{}) ([]map[string]interface{}, error) {
+	var (
+		results  = make([]map[string]interface{}, 0)
+		dataType = table.Columns.Get(column).DataType
+		texts    = make([]string, 0, len(values))
+	)
+
+	for i := range values {
+		text, ok := keyToText(values[i])
+		if !ok || dataType == "" {
+			texts = nil
+			break
+		}
+
+		texts = append(texts, text)
+	}
+
+	if texts == nil {
+		query := fmt.Sprintf("SELECT * FROM %s WHERE %s = $1", pgx.Identifier{table.Name}.Sanitize(), pgx.Identifier{column}.Sanitize())
+
+		for i := range values {
+			rows, err := d.ResultSet(ctx, query, values[i])
+			if err != nil {
+				return nil, err
+			}
+
+			results = append(results, rows...)
+		}
+
+		return results, nil
+	}
+
+	query := selectInQuery(table.Name, column, dataType)
+
+	for start := 0; start < len(texts); start += selectInBatchSize {
+		end := min(start+selectInBatchSize, len(texts))
+
+		rows, err := d.query(ctx, query, texts[start:end])
+		if err != nil {
+			return nil, err
+		}
+
+		for rows.Next() {
+			result, err := marshalRows(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+
+			results = append(results, result)
+		}
+
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("unable to read rows of table %s: %w", table.Name, err)
+		}
+	}
+
+	return results, nil
+}
+
+// insertBatchSize is the maximum number of insert queries sent in a single batch.
+const insertBatchSize = 500
+
+// BulkInsert inserts multiple data a single database transaction. It disables triggers to avoid conflicts on
+// foreign constraints. Rows are sent by batches of insertBatchSize queries.
+func (d *PGDialect) BulkInsert(ctx context.Context, table dialect.Table, data []map[string]interface{}) error {
 	tx, err := d.conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to begin transaction on table %s: %w", table.Name, err)
 	}
 
-	defer func() {
-		err = tx.Rollback(ctx)
-	}()
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := d.disableTriggers(ctx, table, func(ctx context.Context) error {
-		for i := range data {
-			if err := d.insert(ctx, table, data[i]); err != nil {
-				return err
+	if err := d.disableTriggers(ctx, tx, table, func(ctx context.Context) error {
+		for start := 0; start < len(data); start += insertBatchSize {
+			end := min(start+insertBatchSize, len(data))
+			b := &pgx.Batch{}
+
+			for i := start; i < end; i++ {
+				query, args, err := insertQuery(table, data[i])
+				if err != nil {
+					return fmt.Errorf("unable to build insert query of row %d on table %s: %w", i, table.Name, err)
+				}
+
+				b.Queue(query, args...)
+			}
+
+			br := tx.SendBatch(ctx, b)
+
+			for i := start; i < end; i++ {
+				if _, err := br.Exec(); err != nil {
+					_ = br.Close()
+					return fmt.Errorf("unable to insert row %d on table %s: %w", i, table.Name, err)
+				}
+			}
+
+			if err := br.Close(); err != nil {
+				return fmt.Errorf("unable to close batch on table %s: %w", table.Name, err)
 			}
 		}
 
@@ -93,7 +185,7 @@ func (d *PGDialect) BulkInsert(ctx context.Context, table dialect.Table, data []
 		return fmt.Errorf("unable to reset sequence on table %s: %w", table.Name, err)
 	}
 
-	return err
+	return nil
 }
 
 // ReferenceKeys returns the "Referenced by" constraints of a table.
@@ -256,7 +348,6 @@ func (d *PGDialect) Columns(ctx context.Context, tableName string) ([]dialect.Co
 	).
 		From(lk.Table("pg_catalog.pg_attribute").As("a")).
 		Join(lk.Table("pg_catalog.pg_class").As("c"), lk.On("a.attrelid", "c.oid"), lk.LeftJoin).
-		Join(lk.Table("pg_catalog.pg_description").As("pgd"), lk.AndOn(lk.On("pgd.objoid", "a.attrelid"), lk.On("pgd.objsubid", "a.attnum")), lk.LeftJoin).
 		Where(lk.Condition("a.attnum").GreaterThan(0)).
 		And(lk.Condition("a.attisdropped").Equal(false)).
 		OrderBy(lk.Order("a.attnum"))
@@ -268,6 +359,11 @@ func (d *PGDialect) Columns(ctx context.Context, tableName string) ([]dialect.Co
 		}
 
 		builder = builder.Where(lk.Condition("a.attrelid").Equal(oid))
+	} else {
+		builder = builder.
+			Join(lk.Table("pg_catalog.pg_namespace").As("n"), lk.On("n.oid", "c.relnamespace")).
+			And(lk.Condition("n.nspname").Equal("public")).
+			And(lk.Raw("c.relkind = 'r'"))
 	}
 
 	query, args := builder.Query()
@@ -330,7 +426,7 @@ func (d *PGDialect) Table(ctx context.Context, tableName string) (dialect.Table,
 	return table, nil
 }
 
-// Tables returns all the tables from the database.
+// Tables returns all the tables from the database. It runs 4 queries, whatever the number of tables.
 func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 	builder := lk.Select("c.relname").
 		From(lk.Table("pg_catalog.pg_class").As("c")).
@@ -354,33 +450,39 @@ func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 	sortedColumns := make(map[string]dialect.Columns)
 	for i := range columns {
 		tableName := columns[i].TableName
-		_, ok := sortedColumns[tableName]
-		if !ok {
-			sortedColumns[tableName] = make(dialect.Columns, 0)
-		}
 		sortedColumns[tableName] = append(sortedColumns[tableName], columns[i])
+	}
+
+	foreignKeys, referenceKeys, err := d.allForeignKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	primaryKeys, err := d.allPrimaryKeys(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	tables := make(dialect.Tables, len(tableNames))
 	for i := range tableNames {
-		sort.Sort(sortedColumns[tableNames[i]])
+		name := tableNames[i]
+		sort.Sort(sortedColumns[name])
+
 		tables[i] = dialect.Table{
-			Name:    tableNames[i],
-			Columns: sortedColumns[tableNames[i]],
+			Name:          name,
+			Columns:       sortedColumns[name],
+			PrimaryKeys:   primaryKeys[name],
+			ForeignKeys:   foreignKeys[name],
+			ReferenceKeys: referenceKeys[name],
 		}
-		tables[i].ReferenceKeys, err = d.ReferenceKeys(ctx, tableNames[i])
-		if err != nil {
-			return nil, err
+		if tables[i].PrimaryKeys == nil {
+			tables[i].PrimaryKeys = make([]dialect.PrimaryKey, 0)
 		}
-
-		tables[i].ForeignKeys, err = d.ForeignKeys(ctx, tableNames[i])
-		if err != nil {
-			return nil, err
+		if tables[i].ForeignKeys == nil {
+			tables[i].ForeignKeys = make(dialect.ForeignKeys, 0)
 		}
-
-		tables[i].PrimaryKeys, err = d.PrimaryKeys(ctx, tableNames[i])
-		if err != nil {
-			return nil, err
+		if tables[i].ReferenceKeys == nil {
+			tables[i].ReferenceKeys = make(dialect.ReferenceKeys, 0)
 		}
 	}
 
@@ -400,6 +502,96 @@ func (d *PGDialect) Tables(ctx context.Context) (dialect.Tables, error) {
 	}
 
 	return tables, nil
+}
+
+// allForeignKeys returns, in a single query, the foreign keys and the reference keys of all the tables of the public
+// schema, indexed by table name. Constraints with a table outside of the public schema are ignored, and for a
+// multi-column constraint the reference key only contains the first column.
+func (d *PGDialect) allForeignKeys(ctx context.Context) (fks map[string]dialect.ForeignKeys, refs map[string]dialect.ReferenceKeys, err error) {
+	query := `SELECT r.conname,
+       child.relname  AS child_table,
+       parent.relname AS parent_table,
+       pg_catalog.pg_get_constraintdef(r.oid, true) AS condef,
+       (SELECT a.attname FROM pg_attribute a
+         WHERE a.attrelid = r.conrelid AND a.attnum = r.conkey[1]) AS child_column
+FROM pg_catalog.pg_constraint r
+JOIN pg_catalog.pg_class child      ON child.oid = r.conrelid
+JOIN pg_catalog.pg_namespace cn     ON cn.oid = child.relnamespace
+JOIN pg_catalog.pg_class parent     ON parent.oid = r.confrelid
+JOIN pg_catalog.pg_namespace pn     ON pn.oid = parent.relnamespace
+WHERE r.contype = 'f' AND cn.nspname = 'public' AND pn.nspname = 'public'
+ORDER BY child.relname, r.conname`
+
+	var results []struct {
+		Conname     string `db:"conname"`
+		ChildTable  string `db:"child_table"`
+		ParentTable string `db:"parent_table"`
+		Condef      string `db:"condef"`
+		ChildColumn string `db:"child_column"`
+	}
+
+	if err := d.execQuery(ctx, &results, query); err != nil {
+		return nil, nil, fmt.Errorf("unable to retrieve foreign keys: %w", err)
+	}
+
+	foreignKeys := make(map[string]dialect.ForeignKeys)
+	referenceKeys := make(map[string]dialect.ReferenceKeys)
+	for i := range results {
+		matches := fkRegexp.FindStringSubmatch(results[i].Condef)
+		if matches == nil {
+			return nil, nil, fmt.Errorf("unable to parse foreign key definition %s", results[i].Condef)
+		}
+
+		foreignKeys[results[i].ChildTable] = append(foreignKeys[results[i].ChildTable], dialect.ForeignKey{
+			Name:                 results[i].Conname,
+			Definition:           results[i].Condef,
+			ColumnName:           matches[1],
+			ReferencedTableName:  matches[3],
+			ReferencedColumnName: matches[4],
+		})
+
+		referenceKeys[results[i].ParentTable] = append(referenceKeys[results[i].ParentTable], dialect.ReferenceKey{
+			Name:       results[i].Conname,
+			TableName:  results[i].ChildTable,
+			ColumnName: results[i].ChildColumn,
+		})
+	}
+
+	return foreignKeys, referenceKeys, nil
+}
+
+// allPrimaryKeys returns, in a single query, the primary keys of all the tables of the public schema, indexed by
+// table name and ordered as in the index.
+func (d *PGDialect) allPrimaryKeys(ctx context.Context) (map[string][]dialect.PrimaryKey, error) {
+	query := `SELECT c.relname AS table_name, a.attname AS name,
+       format_type(a.atttypid, a.atttypmod) AS data_type
+FROM pg_index i
+JOIN pg_class c      ON c.oid = i.indrelid
+JOIN pg_namespace n  ON n.oid = c.relnamespace
+JOIN pg_attribute a  ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+WHERE i.indisprimary AND n.nspname = 'public'
+ORDER BY c.relname, array_position(i.indkey::int2[], a.attnum)`
+
+	var results []struct {
+		TableName string `db:"table_name"`
+		Name      string `db:"name"`
+		DataType  string `db:"data_type"`
+	}
+
+	if err := d.execQuery(ctx, &results, query); err != nil {
+		return nil, fmt.Errorf("unable to retrieve primary keys: %w", err)
+	}
+
+	primaryKeys := make(map[string][]dialect.PrimaryKey)
+	for i := range results {
+		primaryKeys[results[i].TableName] = append(primaryKeys[results[i].TableName], dialect.PrimaryKey{
+			Name:      results[i].Name,
+			DataType:  results[i].DataType,
+			TableName: results[i].TableName,
+		})
+	}
+
+	return primaryKeys, nil
 }
 
 func (d *PGDialect) execQuery(ctx context.Context, result interface{}, query string, args ...interface{}) error {
@@ -437,22 +629,12 @@ func (d *PGDialect) getTableOID(ctx context.Context, tableName string) (int64, e
 		Comment("table oid")
 	query, args := builder.Query()
 
-	var result pgtype.OID
+	var result uint32
 	if err := d.queryRow(ctx, &result, query, args...); err != nil {
 		return 0, fmt.Errorf("unable to retrieve table %s oid: %w", tableName, err)
 	}
 
-	raw, err := result.Value()
-	if err != nil {
-		return 0, fmt.Errorf("unable to retrieve table %s oid from driver value: %w", tableName, err)
-	}
-
-	val, ok := raw.(int64)
-	if ok {
-		return val, nil
-	}
-
-	return 0, fmt.Errorf("unable to cast %v to int64", val)
+	return int64(result), nil
 }
 
 func (d *PGDialect) exec(ctx context.Context, query string, args ...interface{}) error {
@@ -463,34 +645,64 @@ func (d *PGDialect) exec(ctx context.Context, query string, args ...interface{})
 	return nil
 }
 
-func (d *PGDialect) insert(ctx context.Context, table dialect.Table, data map[string]interface{}) error {
+// insertQuery returns the query and the arguments inserting a row, ignoring primary key conflicts.
+func insertQuery(table dialect.Table, data map[string]interface{}) (query string, args []interface{}, err error) {
 	pairs, err := valuesToPairs(table, data)
 	if err != nil {
-		return fmt.Errorf("unable to convert %v to pairs: %w", data, err)
+		return "", nil, fmt.Errorf("unable to convert %v to pairs: %w", data, err)
 	}
 
-	query, args := lk.Insert(table.Name).
+	// loukoum panics on the values it does not support
+	defer func() {
+		if r := recover(); r != nil {
+			query, args, err = "", nil, fmt.Errorf("unable to build insert query on table %s%s: %v", table.Name, unsupportedColumn(pairs), r)
+		}
+	}()
+
+	query, args = lk.Insert(table.Name).
 		Set(pairs...).
 		OnConflict(table.PrimaryKeyColumnName(), lk.DoNothing()).
 		Query()
-	if err := d.exec(ctx, query, args...); err != nil {
-		return fmt.Errorf("unable to insert %v+ to %s:%w", pairs, table.Name, err)
-	}
 
-	return nil
+	return query, args, nil
 }
 
-func (d *PGDialect) disableTriggers(ctx context.Context, table dialect.Table, f func(ctx context.Context) error) error {
-	if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER ALL;", table.Name)); err != nil {
-		return err
+// unsupportedColumn returns the first column whose value loukoum does not support, with its Go type.
+func unsupportedColumn(pairs []interface{}) (found string) {
+	for _, raw := range pairs {
+		pair, ok := raw.(types.Pair)
+		if !ok {
+			continue
+		}
+
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					found = fmt.Sprintf(", column %v (Go type %T)", pair.Key, pair.Value)
+				}
+			}()
+
+			lk.Insert("t").Set(raw)
+		}()
+		if found != "" {
+			return found
+		}
+	}
+
+	return ""
+}
+
+func (d *PGDialect) disableTriggers(ctx context.Context, tx pgx.Tx, table dialect.Table, f func(ctx context.Context) error) error {
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER ALL;", table.Name)); err != nil {
+		return fmt.Errorf("unable to disable triggers on table %s: %w", table.Name, err)
 	}
 
 	if err := f(ctx); err != nil {
 		return err
 	}
 
-	if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s ENABLE TRIGGER ALL;", table.Name)); err != nil {
-		return err
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER TABLE %s ENABLE TRIGGER ALL;", table.Name)); err != nil {
+		return fmt.Errorf("unable to enable triggers on table %s: %w", table.Name, err)
 	}
 
 	return nil
