@@ -96,13 +96,39 @@ Contraintes communes :
 
 ---
 
-## 3. Extraction : parcours par niveaux (BFS) et requêtes `= ANY($1)`
+## 3. Load : insertion par lots avec `pgx.Batch`
+
+**Fichier :** `dialect/postgres/postgres.go` (`BulkInsert`, `insert`, `exec`).
+
+**Problème :** un `INSERT … ON CONFLICT DO NOTHING` par ligne, donc un aller-retour par ligne.
+
+**Choix :** utiliser `pgx.Batch` avec **exactement** les mêmes requêtes qu'aujourd'hui, générées par loukoum et `valuesToPairs`. On écarte `COPY` : il ne gère pas `ON CONFLICT`, et il faudrait une table temporaire plus une conversion de types différente de `valuesToPairs`. Le gain serait marginal par rapport à `pgx.Batch` pour les volumes de mover (des milliers de lignes, pas des millions), et le risque bien plus élevé.
+
+**Changement :**
+1. Extraire de `insert` une fonction `insertQuery(table, data) (string, []interface{}, error)`, qui construit la requête sans l'exécuter.
+2. Dans `BulkInsert`, à l'intérieur de `disableTriggers` :
+   - parcourir `data` par paquets de `insertBatchSize = 500` (constante du package) ;
+   - pour chaque paquet, créer `b := &pgx.Batch{}`, ajouter chaque requête avec `b.Queue(query, args...)`, puis `br := tx.SendBatch(ctx, b)` ;
+   - appeler `br.Exec()` autant de fois qu'il y a de requêtes dans le paquet, en enveloppant chaque erreur avec la table et l'indice de la ligne ;
+   - appeler ensuite `br.Close()` dans tous les cas, et vérifier son erreur.
+3. Exécuter `ALTER TABLE … DISABLE/ENABLE TRIGGER` via `tx.Exec` plutôt que `d.conn.Exec`. Le résultat est le même aujourd'hui, puisque c'est la même connexion, mais le code devient explicite. `disableTriggers` reçoit donc le `pgx.Tx`.
+4. Corriger le `defer` du rollback : `defer func() { _ = tx.Rollback(ctx) }()`. Aujourd'hui, il réaffecte une variable `err` locale sans aucun effet.
+5. Ne pas toucher à `resetSequence` ni à la logique de `valuesToPairs`.
+
+**Vérification :**
+- Charger un même dossier de sortie avec l'ancien binaire dans une base A et avec le nouveau dans une base B, puis comparer le nombre de lignes et les PK par table.
+- Tester un second `load` sur la même base : il doit être idempotent grâce à `ON CONFLICT DO NOTHING`.
+- Mesurer le temps total avant et après, et l'indiquer dans la PR.
+
+---
+
+## 4. Extraction : parcours par niveaux (BFS) et requêtes `= ANY($1)`
 
 **Fichiers :** `etl/extractor.go` (réécriture), `etl/engine.go` (`Extract`), `dialect/dialect.go` et `dialect/postgres/postgres.go` (nouvelle méthode).
 
 **Problème :** pour chaque ligne, le code lance un `SELECT * FROM t WHERE col = $1` par FK et par reference key, de façon récursive, en profondeur d'abord et en séquentiel. Sur les 80 FK sans index côté enfant, chacune de ces requêtes est un seq scan, répété pour chaque ligne racine.
 
-### 3.1 Comportement actuel à préserver (référence)
+### 4.1 Comportement actuel à préserver (référence)
 - **Requête racine** (et chaque table `Extra`) : `root = true`.
 - **Pour chaque ligne :**
   - si la clé `"<table>(<pk>) = <valeur>"` est déjà dans `processedRelations`, on l'ignore ; sinon on la marque.
@@ -114,7 +140,7 @@ Contraintes communes :
   - **Queries (config)** : pour chaque `schema.Queries[k]`, on exécute `replaceVar(query, row)` telle quelle, avec `root = false`.
 - Le `depth` actuel ne sert qu'à décider de `root` (`depth == 0`) et à l'indentation des logs. Les appels récursifs se font avec `depth+1` ou `depth+2`, donc seule la racine a `depth == 0`.
 
-### 3.2 Nouvelle méthode de dialecte
+### 4.2 Nouvelle méthode de dialecte
 ```go
 // dialect.Dialect
 SelectIn(ctx context.Context, table Table, column string, values []interface{}) ([]map[string]interface{}, error)
@@ -134,7 +160,7 @@ Implémentation Postgres :
 - Découper `values` en paquets de `selectInBatchSize = 1000`.
 - Transformer les lignes avec `marshalRows`, comme `ResultSet`.
 
-### 3.3 Nouvel algorithme de l'extracteur
+### 4.3 Nouvel algorithme de l'extracteur
 État de l'extracteur :
 ```go
 type fetchKey struct{ table, column string }
@@ -152,7 +178,7 @@ type pending struct {
 ```
 Déroulement de `Handle(ctx, schema, query)` et de `HandleRoot` :
 1. Exécuter la requête racine via `ResultSet`, ranger les lignes dans `extract[table][cacheKey(query)]`, puis appeler `visit(rows, table, root=true)`.
-2. `visit` applique les règles de 3.1 à chaque ligne. Au lieu de lancer des requêtes, il **accumule** dans le `pending` du niveau suivant :
+2. `visit` applique les règles de 4.1 à chaque ligne. Au lieu de lancer des requêtes, il **accumule** dans le `pending` du niveau suivant :
    - **FK** : ajouter `v` dans `in[{refTable, refCol}]`, sauf si `v` est déjà dans `fetched` pour cette clé ou si la relation est déjà dans `processed` ;
    - **Reference key** : ajouter `row[pk]` dans `in[{rk.Table.Name, rk.ColumnName}]`, avec la même déduplication ;
    - **Queries** : ajouter la chaîne produite par `replaceVar` dans `raw`, en dédupliquant par chaîne.
@@ -170,7 +196,7 @@ Logs :
 - Supprimer les logs Debug ligne par ligne qui font des `fmt.Sprintf`, ou les protéger avec `if ce := logger.Check(zap.DebugLevel, …); ce != nil`.
 - Ajouter un log Info final : nombre de requêtes SQL et nombre de lignes par table.
 
-### 3.4 Tests
+### 4.4 Tests
 - **Unitaires** (`etl/extractor_test.go`), avec un faux `dialect.Dialect` en mémoire : des tables avec PK, FK et reference keys, où `SelectIn` filtre les lignes et compte ses appels. Cas à couvrir :
   1. une racine avec FK vers un parent et une reference key vers des enfants, en vérifiant l'ensemble des (table, PK) extraits ;
   2. une FK vers la même table (comme `oauth2_refresh_token.rotated_from_id`), qui doit se terminer sans boucle infinie ;
@@ -191,4 +217,3 @@ Logs :
 - `PrimaryKeyColumnName()` panique sur les tables sans PK.
 - `resetSequence` suppose une séquence `<table>_id_seq` et une colonne `id`.
 - Index sur les FK côté enfant en prod (80 FK concernées) : c'est une décision qui concerne l'API ulule, pas mover.
-- Insertion par lots au `load` (`pgx.Batch`) : écartée. L'insertion ligne par ligne se fait en local et y est assez rapide.
