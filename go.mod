@@ -1,6 +1,6 @@
 module github.com/ulule/mover
 
-go 1.21
+go 1.27
 
 require (
 	github.com/georgysavva/scany v0.2.7

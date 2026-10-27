@@ -7,7 +7,7 @@ Contexte : audit du 2026-10-26, mesures prises sur ulule-prod en lisant uniqueme
 
 Contraintes communes :
 - Une seule `pgx.Conn` (pgx v4), pas de pool. Rien ici n'introduit de concurrence SQL.
-- Go 1.21 dans `go.mod`, donc `errors.Join` est disponible.
+- Go 1.27 dans `go.mod` (mis à jour dans cette PR), donc `errors.Join` est disponible.
 - Le format de sortie (`jsonPayload`, un fichier par table) **ne change pas**. Un dossier extrait avant les correctifs doit toujours pouvoir être chargé, et inversement.
 - Un commit, et idéalement une PR, par correctif, dans l'ordre ci-dessous (du plus simple au plus risqué).
 - Vérifications à chaque étape : `go build ./...`, `go vet ./...`, `make test`, `make lint`.
