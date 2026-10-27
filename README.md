@@ -40,3 +40,7 @@ Load data to your local database:
 export LOCAL_DSN="postgresql://user:password@localhost:5432/dbname"
 go run cmd/mover/main.go -dsn $LOCAL_DSN -path output -action load
 ```
+
+## How it works
+
+See [docs/how-it-works.md](docs/how-it-works.md) (in French) for a walkthrough of the extract and load pipelines, the config format and the known limits.
