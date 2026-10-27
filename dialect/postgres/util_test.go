@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/ulule/loukoum/v3/types"
 
 	"github.com/ulule/mover/dialect"
 )
@@ -164,4 +165,83 @@ func TestInsertQuery(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, `INSERT INTO "users" ("id") VALUES ($1) ON CONFLICT ("id") DO NOTHING`, query)
 	assert.Equal(t, []interface{}{int32(1)}, args)
+}
+
+func TestValuesToPairsArrays(t *testing.T) {
+	table := dialect.Table{Name: "t", Columns: dialect.Columns{
+		{Name: "events", DataType: "text[]"},
+		{Name: "ints", DataType: "integer[]"},
+		{Name: "bigs", DataType: "bigint[]"},
+		{Name: "names", DataType: "character varying(10)[]"},
+		{Name: "prices", DataType: "numeric(10,2)[]"},
+		{Name: "ids", DataType: "uuid[]"},
+		{Name: "days", DataType: "date[]"},
+		{Name: "weird", DataType: "inet[]"},
+	}}
+
+	value := func(data map[string]interface{}) interface{} {
+		pairs, err := valuesToPairs(table, data)
+		require.NoError(t, err)
+		require.Len(t, pairs, 1)
+
+		return pairs[0].(types.Pair).Value
+	}
+
+	events := value(map[string]interface{}{"events": []interface{}{"order.completed", "order.cancelled", "subscription.cancelled"}})
+	assert.Equal(t, []string{"order.completed", "order.cancelled", "subscription.cancelled"}, derefAll(t, events.(arrayArg[*string]).Elements))
+
+	ints := value(map[string]interface{}{"ints": []interface{}{float64(1), float64(2)}})
+	assert.Equal(t, []int32{1, 2}, derefAll(t, ints.(arrayArg[*int32]).Elements))
+
+	bigs := value(map[string]interface{}{"bigs": []interface{}{float64(1), json.Number("9007199254740993")}})
+	assert.Equal(t, []int64{1, 9007199254740993}, derefAll(t, bigs.(arrayArg[*int64]).Elements))
+
+	empty := value(map[string]interface{}{"events": []interface{}{}}).(arrayArg[*string])
+	assert.True(t, empty.Valid)
+	assert.Empty(t, empty.Elements)
+
+	withNull := value(map[string]interface{}{"names": []interface{}{"a", nil}}).(arrayArg[*string])
+	require.Len(t, withNull.Elements, 2)
+	assert.Equal(t, "a", *withNull.Elements[0])
+	assert.Nil(t, withNull.Elements[1])
+
+	_ = value(map[string]interface{}{"prices": []interface{}{float64(1.5), "2.25"}})
+	_ = value(map[string]interface{}{"ids": []interface{}{"123e4567-e89b-12d3-a456-426614174000"}})
+	_ = value(map[string]interface{}{"days": []interface{}{"2025-12-09", "2025-12-09T00:00:00Z"}})
+
+	for _, data := range []map[string]interface{}{
+		{"ints": []interface{}{1.5}},
+		{"ints": []interface{}{float64(1 << 40)}},
+		{"ints": []interface{}{"1"}},
+		{"events": []interface{}{float64(1)}},
+		{"ids": []interface{}{"nope"}},
+		{"weird": []interface{}{"127.0.0.1"}},
+	} {
+		_, err := valuesToPairs(table, data)
+		assert.Error(t, err, "%v", data)
+	}
+}
+
+func derefAll[T any](t *testing.T, elements []*T) []T {
+	t.Helper()
+
+	values := make([]T, len(elements))
+	for i := range elements {
+		require.NotNil(t, elements[i])
+		values[i] = *elements[i]
+	}
+
+	return values
+}
+
+func TestInsertQueryUnsupportedValue(t *testing.T) {
+	table := dialect.Table{Name: "mvt_t", PrimaryKeys: []dialect.PrimaryKey{{Name: "id"}}}
+
+	assert.NotPanics(t, func() {
+		_, _, err := insertQuery(table, map[string]interface{}{"id": 1, "bad": []string{"a"}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mvt_t")
+		assert.Contains(t, err.Error(), "bad")
+		assert.Contains(t, err.Error(), "[]string")
+	})
 }

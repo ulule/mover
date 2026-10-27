@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -47,35 +48,7 @@ func valuesToPairs(table dialect.Table, data map[string]interface{}) ([]interfac
 		case []interface{}:
 			column := table.Columns.Get(k)
 
-			switch column.DataType {
-			case "smallint[]":
-				elements := make([]int16, len(v))
-				for i := range v {
-					elements[i] = int16(v[i].(float64))
-				}
-				pairs[i] = lk.Pair(k, newArray(elements))
-			case "integer[]":
-				elements := make([]int32, len(v))
-				for i := range v {
-					elements[i] = int32(v[i].(float64))
-				}
-				pairs[i] = lk.Pair(k, newArray(elements))
-			case "character varying[]":
-				elements := make([]string, len(v))
-				for i := range v {
-					elements[i] = v[i].(string)
-				}
-				pairs[i] = lk.Pair(k, newArray(elements))
-			case "timestamp without time zone[]":
-				elements := make([]time.Time, len(v))
-				for i := range v {
-					t, err := time.Parse(time.RFC3339, v[i].(string))
-					if err != nil {
-						return nil, fmt.Errorf("unable to parse %v to time.Time: %w", v[i], err)
-					}
-					elements[i] = t
-				}
-				pairs[i] = lk.Pair(k, newArray(elements))
+			switch dataType := normalizeDataType(column.DataType); dataType {
 			case "jsonb":
 				b, err := json.Marshal(v)
 				if err != nil {
@@ -83,7 +56,11 @@ func valuesToPairs(table dialect.Table, data map[string]interface{}) ([]interfac
 				}
 				pairs[i] = lk.Pair(k, jsonArg(b))
 			default:
-				pairs[i] = lk.Pair(k, v)
+				array, err := arrayToArg(dataType, v)
+				if err != nil {
+					return nil, fmt.Errorf("unable to convert column %s of table %s (%s): %w", k, table.Name, column.DataType, err)
+				}
+				pairs[i] = lk.Pair(k, array)
 			}
 		default:
 			pairs[i] = lk.Pair(k, v)
@@ -92,6 +69,159 @@ func valuesToPairs(table dialect.Table, data map[string]interface{}) ([]interfac
 		i++
 	}
 	return pairs, nil
+}
+
+// typmodRegexp matches the type modifiers of format_type, such as (10) or (10,2).
+var typmodRegexp = regexp.MustCompile(`\(\d+(,\d+)?\)`)
+
+// normalizeDataType removes the type modifiers from a format_type data type.
+func normalizeDataType(dataType string) string {
+	return strings.Join(strings.Fields(typmodRegexp.ReplaceAllString(dataType, "")), " ")
+}
+
+// arrayToArg converts a JSON array to the value of an array column, depending on its normalized data type. A JSON
+// null element is a NULL element and an empty JSON array is an empty array.
+func arrayToArg(dataType string, v []interface{}) (interface{}, error) {
+	switch dataType {
+	case "text[]", "character varying[]", "character[]", "name[]", "citext[]":
+		return buildArray(v, toString)
+	case "smallint[]":
+		return buildArray(v, toInt[int16])
+	case "integer[]":
+		return buildArray(v, toInt[int32])
+	case "bigint[]":
+		return buildArray(v, toInt[int64])
+	case "boolean[]":
+		return buildArray(v, func(e interface{}) (bool, error) {
+			b, ok := e.(bool)
+			if !ok {
+				return false, fmt.Errorf("unable to convert %v (%T) to bool", e, e)
+			}
+
+			return b, nil
+		})
+	case "real[]":
+		return buildArray(v, func(e interface{}) (float32, error) {
+			f, err := toFloat64(e)
+
+			return float32(f), err
+		})
+	case "double precision[]":
+		return buildArray(v, toFloat64)
+	case "numeric[]":
+		return buildArray(v, func(e interface{}) (pgtype.Numeric, error) {
+			var (
+				n    pgtype.Numeric
+				text string
+			)
+			switch e := e.(type) {
+			case string:
+				text = e
+			case json.Number:
+				text = e.String()
+			case float64:
+				text = strconv.FormatFloat(e, 'f', -1, 64)
+			default:
+				return n, fmt.Errorf("unable to convert %v (%T) to numeric", e, e)
+			}
+			err := n.Scan(text)
+
+			return n, err
+		})
+	case "uuid[]":
+		return buildArray(v, func(e interface{}) (pgtype.UUID, error) {
+			var u pgtype.UUID
+			s, ok := e.(string)
+			if !ok {
+				return u, fmt.Errorf("unable to convert %v (%T) to uuid", e, e)
+			}
+
+			err := u.Scan(s)
+
+			return u, err
+		})
+	case "timestamp without time zone[]", "timestamp with time zone[]", "date[]":
+		return buildArray(v, func(e interface{}) (time.Time, error) {
+			s, ok := e.(string)
+			if !ok {
+				return time.Time{}, fmt.Errorf("unable to convert %v (%T) to time.Time", e, e)
+			}
+			t, err := time.Parse(time.RFC3339, s)
+			if err != nil && dataType == "date[]" {
+				t, err = time.Parse(time.DateOnly, s)
+			}
+			if err != nil {
+				return t, fmt.Errorf("unable to parse %v to time.Time: %w", e, err)
+			}
+
+			return t, nil
+		})
+	}
+
+	return nil, fmt.Errorf("unsupported array data type %q", dataType)
+}
+
+// buildArray converts the elements of a JSON array, a nil element being a NULL element.
+func buildArray[T any](v []interface{}, convert func(interface{}) (T, error)) (interface{}, error) {
+	elements := make([]*T, len(v))
+	for i := range v {
+		if v[i] == nil {
+			continue
+		}
+
+		element, err := convert(v[i])
+		if err != nil {
+			return nil, fmt.Errorf("element %d: %w", i, err)
+		}
+		elements[i] = &element
+	}
+
+	return newArray(elements), nil
+}
+
+func toString(e interface{}) (string, error) {
+	s, ok := e.(string)
+	if !ok {
+		return "", fmt.Errorf("unable to convert %v (%T) to string", e, e)
+	}
+
+	return s, nil
+}
+
+func toFloat64(e interface{}) (float64, error) {
+	switch e := e.(type) {
+	case float64:
+		return e, nil
+	case json.Number:
+		return e.Float64()
+	}
+
+	return 0, fmt.Errorf("unable to convert %v (%T) to float64", e, e)
+}
+
+// toInt converts a JSON number, a float64 unless the decoder uses json.Number, to an integer type.
+func toInt[T int16 | int32 | int64](e interface{}) (T, error) {
+	var n int64
+	switch e := e.(type) {
+	case float64:
+		n = int64(e)
+		if float64(n) != e {
+			return 0, fmt.Errorf("%v is not an integer", e)
+		}
+	case json.Number:
+		var err error
+		if n, err = e.Int64(); err != nil {
+			return 0, fmt.Errorf("unable to convert %v to integer: %w", e, err)
+		}
+	default:
+		return 0, fmt.Errorf("unable to convert %v (%T) to integer", e, e)
+	}
+
+	if T(n) < 0 != (n < 0) || int64(T(n)) != n {
+		return 0, fmt.Errorf("%d overflows %T", n, T(0))
+	}
+
+	return T(n), nil
 }
 
 func rowsToMap(rows pgx.Rows) (map[string]interface{}, error) {

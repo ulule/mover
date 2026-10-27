@@ -10,6 +10,7 @@ import (
 	"github.com/georgysavva/scany/v2/pgxscan"
 	"github.com/jackc/pgx/v5"
 	lk "github.com/ulule/loukoum/v3"
+	"github.com/ulule/loukoum/v3/types"
 
 	"github.com/ulule/mover/dialect"
 )
@@ -651,12 +652,44 @@ func insertQuery(table dialect.Table, data map[string]interface{}) (query string
 		return "", nil, fmt.Errorf("unable to convert %v to pairs: %w", data, err)
 	}
 
+	// loukoum panics on the values it does not support
+	defer func() {
+		if r := recover(); r != nil {
+			query, args, err = "", nil, fmt.Errorf("unable to build insert query on table %s%s: %v", table.Name, unsupportedColumn(pairs), r)
+		}
+	}()
+
 	query, args = lk.Insert(table.Name).
 		Set(pairs...).
 		OnConflict(table.PrimaryKeyColumnName(), lk.DoNothing()).
 		Query()
 
 	return query, args, nil
+}
+
+// unsupportedColumn returns the first column whose value loukoum does not support, with its Go type.
+func unsupportedColumn(pairs []interface{}) (found string) {
+	for _, raw := range pairs {
+		pair, ok := raw.(types.Pair)
+		if !ok {
+			continue
+		}
+
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					found = fmt.Sprintf(", column %v (Go type %T)", pair.Key, pair.Value)
+				}
+			}()
+
+			lk.Insert("t").Set(raw)
+		}()
+		if found != "" {
+			return found
+		}
+	}
+
+	return ""
 }
 
 func (d *PGDialect) disableTriggers(ctx context.Context, tx pgx.Tx, table dialect.Table, f func(ctx context.Context) error) error {

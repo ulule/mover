@@ -4,6 +4,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"sort"
 	"strings"
@@ -415,4 +416,74 @@ CREATE TABLE mvt_bulk (id serial PRIMARY KEY, name varchar(10) NOT NULL);`)
 	// the connection is still usable
 	require.NoError(t, d.BulkInsert(ctx, table, failing[:1]))
 	assert.Equal(t, len(rows)+1, count())
+}
+
+// TestBulkInsertArrays inserts rows decoded from JSON, as the loader does, into array columns.
+func TestBulkInsertArrays(t *testing.T) {
+	dsn := os.Getenv("MOVER_TEST_DSN")
+	if dsn == "" {
+		t.Skip("MOVER_TEST_DSN is not set")
+	}
+
+	ctx := context.Background()
+
+	conn, err := pgx.Connect(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close(context.Background()) })
+
+	_, err = conn.Exec(ctx, `
+DROP TABLE IF EXISTS mvt_arrays;
+CREATE TABLE mvt_arrays (id serial PRIMARY KEY, events text[], names varchar(20)[], counts int4[], bigs int8[]);`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := conn.Exec(context.Background(), "DROP TABLE IF EXISTS mvt_arrays")
+		assert.NoError(t, err)
+	})
+
+	table := dialect.Table{
+		Name:        "mvt_arrays",
+		PrimaryKeys: []dialect.PrimaryKey{{Name: "id"}},
+		Columns: dialect.Columns{
+			{Name: "id", DataType: "integer"},
+			{Name: "events", DataType: "text[]"},
+			{Name: "names", DataType: "character varying(20)[]"},
+			{Name: "counts", DataType: "integer[]"},
+			{Name: "bigs", DataType: "bigint[]"},
+		},
+	}
+
+	var rows []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(`[
+{"id": 1, "events": ["order.completed", "order.cancelled", "subscription.cancelled"], "names": ["a", null], "counts": [1, 2, 3], "bigs": [9007199254740992]},
+{"id": 2, "events": [], "names": [], "counts": [], "bigs": []},
+{"id": 3, "events": null, "names": null, "counts": null, "bigs": null}
+]`), &rows))
+
+	require.NoError(t, (&PGDialect{conn: conn}).BulkInsert(ctx, table, rows))
+
+	var (
+		events []string
+		counts []int32
+		bigs   []int64
+	)
+	require.NoError(t, conn.QueryRow(ctx, "SELECT events, counts, bigs FROM mvt_arrays WHERE id = 1").Scan(&events, &counts, &bigs))
+	assert.Equal(t, []string{"order.completed", "order.cancelled", "subscription.cancelled"}, events)
+	assert.Equal(t, []int32{1, 2, 3}, counts)
+	assert.Equal(t, []int64{9007199254740992}, bigs)
+
+	var nullNames []*string
+	require.NoError(t, conn.QueryRow(ctx, "SELECT names FROM mvt_arrays WHERE id = 1").Scan(&nullNames))
+	require.Len(t, nullNames, 2)
+	assert.Equal(t, "a", *nullNames[0])
+	assert.Nil(t, nullNames[1])
+
+	// an empty array is stored as an empty array, not as NULL
+	var isNull bool
+	require.NoError(t, conn.QueryRow(ctx, "SELECT events IS NULL FROM mvt_arrays WHERE id = 2").Scan(&isNull))
+	assert.False(t, isNull)
+	require.NoError(t, conn.QueryRow(ctx, "SELECT cardinality(events) = 0 AND cardinality(counts) = 0 FROM mvt_arrays WHERE id = 2").Scan(&isNull))
+	assert.True(t, isNull)
+
+	require.NoError(t, conn.QueryRow(ctx, "SELECT events IS NULL AND counts IS NULL FROM mvt_arrays WHERE id = 3").Scan(&isNull))
+	assert.True(t, isNull)
 }
