@@ -2,6 +2,7 @@ package etl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,11 +11,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ulule/mover/config"
 )
+
+const defaultDownloadConcurrency = 10
+
+var httpClient = &http.Client{Timeout: 60 * time.Second}
 
 var sqlSelectRegexp = regexp.MustCompile(`^(?i)SELECT (?P<columns>.*[^T]) FROM (?P<table>\w+).*`)
 
@@ -71,53 +78,50 @@ func extractFilenames(schema config.Schema, rows entry) []string {
 	return filenames
 }
 
-func chunkStrings(slice []string, chunkSize int) [][]string {
-	var chunks [][]string
-	for i := 0; i < len(slice); i += chunkSize {
-		end := i + chunkSize
+func downloadFiles(ctx context.Context, filenames []string, outputPath string, concurrency int) error {
+	if concurrency <= 0 {
+		concurrency = defaultDownloadConcurrency
+	}
 
-		// necessary check to avoid slicing beyond
-		// slice capacity
-		if end > len(slice) {
-			end = len(slice)
+	// two rows can point to the same media: download each file once
+	seen := make(map[string]struct{}, len(filenames))
+
+	var (
+		g    errgroup.Group
+		mu   sync.Mutex
+		errs []error
+	)
+	g.SetLimit(concurrency)
+
+	for _, filename := range filenames {
+		if _, ok := seen[filename]; ok {
+			continue
 		}
+		seen[filename] = struct{}{}
 
-		chunks = append(chunks, slice[i:end])
-	}
-
-	return chunks
-}
-
-func downloadFiles(ctx context.Context, filenames []string, outputPath string, chunkSize int) error {
-	g, _ := errgroup.WithContext(ctx)
-	var chunks [][]string
-	if chunkSize == 0 {
-		chunks = [][]string{filenames}
-	} else {
-		chunks = chunkStrings(filenames, chunkSize)
-	}
-	for i := range chunks {
-		for j := range chunks[i] {
-			g.Go((func(filename string) func() error {
-				return func() error {
-					if err := downloadFile(filename, outputPath); err != nil {
-						return err
-					}
-
-					return nil
-				}
-			})(chunks[i][j]))
-			if err := g.Wait(); err != nil {
-				return err
+		g.Go(func() error {
+			if err := downloadFile(ctx, httpClient, filename, outputPath); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
 			}
-		}
+
+			return nil
+		})
 	}
 
-	return nil
+	_ = g.Wait()
+
+	return errors.Join(errs...)
 }
 
-func downloadFile(absoluteURL, outputDir string) error {
-	res, err := http.Get(absoluteURL)
+func downloadFile(ctx context.Context, client *http.Client, absoluteURL, outputDir string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, absoluteURL, http.NoBody)
+	if err != nil {
+		return fmt.Errorf("unable to create request for %s: %w", absoluteURL, err)
+	}
+
+	res, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("unable to retrieve %s: %w", absoluteURL, err)
 	}

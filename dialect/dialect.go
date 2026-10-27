@@ -117,4 +117,5 @@ type Dialect interface {
 	Columns(context.Context, string) ([]Column, error)
 	BulkInsert(context.Context, Table, []map[string]interface{}) error
 	ResultSet(context.Context, string, ...interface{}) ([]map[string]interface{}, error)
+	SelectIn(ctx context.Context, table Table, column string, values []interface{}) ([]map[string]interface{}, error)
 }
