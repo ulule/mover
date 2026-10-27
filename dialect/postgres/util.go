@@ -1,13 +1,16 @@
 package postgres
 
 import (
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net"
+	"net/netip"
+	"strings"
 	"time"
 
-	"github.com/jackc/pgtype"
-	"github.com/jackc/pgx/v4"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	lk "github.com/ulule/loukoum/v3"
 
 	"github.com/ulule/mover/dialect"
@@ -39,7 +42,7 @@ func valuesToPairs(table dialect.Table, data map[string]interface{}) ([]interfac
 				return nil, fmt.Errorf("unable to encode %v to JSON: %w", v, err)
 			}
 
-			pairs[i] = lk.Pair(k, &pgtype.JSONB{Bytes: res, Status: pgtype.Present})
+			pairs[i] = lk.Pair(k, jsonArg(res))
 		case []interface{}:
 			column := table.Columns.Get(k)
 
@@ -49,31 +52,19 @@ func valuesToPairs(table dialect.Table, data map[string]interface{}) ([]interfac
 				for i := range v {
 					elements[i] = int16(v[i].(float64))
 				}
-				values := &pgtype.Int2Array{}
-				if err := values.Set(elements); err != nil {
-					return nil, fmt.Errorf("unable to encode %v to pgtype.Int2Array: %w", elements, err)
-				}
-				pairs[i] = lk.Pair(k, values)
+				pairs[i] = lk.Pair(k, newArray(elements))
 			case "integer[]":
 				elements := make([]int32, len(v))
 				for i := range v {
 					elements[i] = int32(v[i].(float64))
 				}
-				values := &pgtype.Int4Array{}
-				if err := values.Set(elements); err != nil {
-					return nil, fmt.Errorf("unable to encode %v to pgtype.Int4Array: %w", elements, err)
-				}
-				pairs[i] = lk.Pair(k, values)
+				pairs[i] = lk.Pair(k, newArray(elements))
 			case "character varying[]":
 				elements := make([]string, len(v))
 				for i := range v {
 					elements[i] = v[i].(string)
 				}
-				values := &pgtype.VarcharArray{}
-				if err := values.Set(elements); err != nil {
-					return nil, fmt.Errorf("unable to encode %v to pgtype.VarcharArray: %w", elements, err)
-				}
-				pairs[i] = lk.Pair(k, values)
+				pairs[i] = lk.Pair(k, newArray(elements))
 			case "timestamp without time zone[]":
 				elements := make([]time.Time, len(v))
 				for i := range v {
@@ -83,17 +74,13 @@ func valuesToPairs(table dialect.Table, data map[string]interface{}) ([]interfac
 					}
 					elements[i] = t
 				}
-				values := &pgtype.TimestampArray{}
-				if err := values.Set(elements); err != nil {
-					return nil, fmt.Errorf("unable to encode %v to pgtype.TimestampArray: %w", elements, err)
-				}
-				pairs[i] = lk.Pair(k, values)
+				pairs[i] = lk.Pair(k, newArray(elements))
 			case "jsonb":
 				b, err := json.Marshal(v)
 				if err != nil {
 					return nil, fmt.Errorf("unable to encode %v to JSON: %w", v, err)
 				}
-				pairs[i] = lk.Pair(k, &pgtype.JSONB{Bytes: b, Status: pgtype.Present})
+				pairs[i] = lk.Pair(k, jsonArg(b))
 			default:
 				pairs[i] = lk.Pair(k, v)
 			}
@@ -114,74 +101,128 @@ func rowsToMap(rows pgx.Rows) (map[string]interface{}, error) {
 	result := make(map[string]interface{}, len(values))
 	fields := rows.FieldDescriptions()
 	for i := range fields {
-		value := values[i]
-		result[string(fields[i].Name)] = value
+		result[fields[i].Name] = convertValue(fields[i].DataTypeOID, values[i])
 	}
 
 	return result, nil
 }
 
 func marshalRows(rows pgx.Rows) (map[string]interface{}, error) {
-	results, err := rowsToMap(rows)
-	if err != nil {
-		return nil, err
+	return rowsToMap(rows)
+}
+
+// typeMap is only used to know if an OID is an array type.
+var typeMap = pgtype.NewMap()
+
+func isArrayOID(oid uint32) bool {
+	t, ok := typeMap.TypeForOID(oid)
+	if !ok {
+		return false
 	}
 
-	for k, v := range results {
-		switch v := v.(type) {
-		case pgtype.Int4range:
-			value, err := v.Value()
-			if err != nil {
-				return nil, fmt.Errorf("unable to decode %v+: %w", v, err)
-			}
+	_, ok = t.Codec.(*pgtype.ArrayCodec)
 
-			results[k] = value
-		case *net.IPNet:
-			results[k] = v.String()
-		case pgtype.VarcharArray:
-			var values []string
-			if v.Elements != nil {
-				if err := v.AssignTo(&values); err != nil {
-					return nil, fmt.Errorf("unable to decode %v+: %w", v, err)
-				}
-			}
+	return ok
+}
 
-			results[k] = values
-		case pgtype.TimestampArray:
-			var values []time.Time
-			if v.Elements != nil {
-				if err := v.AssignTo(&values); err != nil {
-					return nil, fmt.Errorf("unable to decode %v+: %w", v, err)
-				}
-			}
+// legacyInterval keeps the JSON representation of pgtype.Interval from pgx v4 (Status 2 means present).
+type legacyInterval struct {
+	Microseconds int64
+	Days         int32
+	Months       int32
+	Status       byte
+}
 
-			results[k] = values
-		case pgtype.Int2Array:
-			var values []int8
-			if v.Elements != nil {
-				if err := v.AssignTo(&values); err != nil {
-					return nil, fmt.Errorf("unable to decode %v+: %w", v, err)
-				}
-			}
+// convertValue converts a value returned by pgx v5 to the representation produced by pgx v4, to keep
+// the JSON output unchanged.
+func convertValue(oid uint32, value interface{}) interface{} {
+	switch v := value.(type) {
+	case netip.Prefix:
+		return v.String()
+	case pgtype.Numeric:
+		f, err := v.Float64Value()
+		if err != nil || !f.Valid {
+			return nil
+		}
 
-			results[k] = values
-		case pgtype.Int4Array:
-			var values []int32
-			if v.Elements != nil {
-				if err := v.AssignTo(&values); err != nil {
-					return nil, fmt.Errorf("unable to decode %v+: %w", v, err)
-				}
-			}
+		return f.Float64
+	case pgtype.Time:
+		if !v.Valid {
+			return nil
+		}
 
-			results[k] = values
-		case pgtype.Numeric:
-			var res float64
-			if err := v.AssignTo(&res); err != nil {
-				return nil, fmt.Errorf("unable to decode %v+: %w", v, err)
-			}
-			results[k] = res
+		return v.Microseconds
+	case pgtype.Interval:
+		if !v.Valid {
+			return nil
+		}
+
+		return legacyInterval{Microseconds: v.Microseconds, Days: v.Days, Months: v.Months, Status: 2}
+	case pgtype.Range[interface{}]:
+		return rangeToString(v)
+	case []interface{}:
+		// an empty array was encoded as null, a JSON array is left untouched
+		if len(v) == 0 && isArrayOID(oid) {
+			return nil
 		}
 	}
 
-	return results, nil
+	return value
+}
+
+// rangeToString formats a range as PostgreSQL does, for instance "[1,5)".
+func rangeToString(r pgtype.Range[interface{}]) string {
+	if !r.Valid || r.LowerType == pgtype.Empty {
+		return "empty"
+	}
+
+	var b strings.Builder
+	if r.LowerType == pgtype.Inclusive {
+		b.WriteString("[")
+	} else {
+		b.WriteString("(")
+	}
+	if r.LowerType == pgtype.Inclusive || r.LowerType == pgtype.Exclusive {
+		fmt.Fprint(&b, r.Lower)
+	}
+	b.WriteString(",")
+	if r.UpperType == pgtype.Inclusive || r.UpperType == pgtype.Exclusive {
+		fmt.Fprint(&b, r.Upper)
+	}
+	if r.UpperType == pgtype.Inclusive {
+		b.WriteString("]")
+	} else {
+		b.WriteString(")")
+	}
+
+	return b.String()
+}
+
+// loukoum only accepts a few kinds of arguments, including driver.Valuer, and pgx v5 does not need
+// pgtype values to implement it anymore. The two types below fulfill both.
+
+// jsonArg is a raw JSON document.
+type jsonArg []byte
+
+// Value implements driver.Valuer.
+func (j jsonArg) Value() (driver.Value, error) {
+	return string(j), nil
+}
+
+// arrayArg is an array encoded by pgx through pgtype.ArrayGetter.
+type arrayArg[T any] struct {
+	pgtype.Array[T]
+}
+
+// Value implements driver.Valuer. It is never used as pgx prefers pgtype.ArrayGetter.
+func (arrayArg[T]) Value() (driver.Value, error) {
+	return nil, errors.New("array must be encoded by pgx")
+}
+
+func newArray[T any](elements []T) arrayArg[T] {
+	return arrayArg[T]{pgtype.Array[T]{
+		Elements: elements,
+		Dims:     []pgtype.ArrayDimension{{Length: int32(len(elements)), LowerBound: 1}},
+		Valid:    true,
+	}}
 }

@@ -7,9 +7,8 @@ import (
 	"regexp"
 	"sort"
 
-	"github.com/georgysavva/scany/pgxscan"
-	"github.com/jackc/pgtype"
-	"github.com/jackc/pgx/v4"
+	"github.com/georgysavva/scany/v2/pgxscan"
+	"github.com/jackc/pgx/v5"
 	lk "github.com/ulule/loukoum/v3"
 
 	"github.com/ulule/mover/dialect"
@@ -437,22 +436,12 @@ func (d *PGDialect) getTableOID(ctx context.Context, tableName string) (int64, e
 		Comment("table oid")
 	query, args := builder.Query()
 
-	var result pgtype.OID
+	var result uint32
 	if err := d.queryRow(ctx, &result, query, args...); err != nil {
 		return 0, fmt.Errorf("unable to retrieve table %s oid: %w", tableName, err)
 	}
 
-	raw, err := result.Value()
-	if err != nil {
-		return 0, fmt.Errorf("unable to retrieve table %s oid from driver value: %w", tableName, err)
-	}
-
-	val, ok := raw.(int64)
-	if ok {
-		return val, nil
-	}
-
-	return 0, fmt.Errorf("unable to cast %v to int64", val)
+	return int64(result), nil
 }
 
 func (d *PGDialect) exec(ctx context.Context, query string, args ...interface{}) error {

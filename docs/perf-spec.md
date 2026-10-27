@@ -6,10 +6,10 @@ Contexte : audit du 2026-10-26, mesures prises sur ulule-prod en lisant uniqueme
 - 80 FK sans index côté enfant, dont 10 sur des tables de plus de 1M lignes (`shop_order` : 9,9M lignes, 11 GB).
 
 Contraintes communes :
-- Une seule `pgx.Conn` (pgx v4), pas de pool. Rien ici n'introduit de concurrence SQL.
+- Une seule `pgx.Conn` (pgx v5), pas de pool. Rien ici n'introduit de concurrence SQL.
 - Go 1.27 dans `go.mod` (mis à jour dans cette PR), donc `errors.Join` est disponible.
 - Le format de sortie (`jsonPayload`, un fichier par table) **ne change pas**. Un dossier extrait avant les correctifs doit toujours pouvoir être chargé, et inversement.
-- Un commit, et idéalement une PR, par correctif, dans l'ordre ci-dessous (du plus simple au plus risqué).
+- Une seule PR, avec un commit par correctif, dans l'ordre ci-dessous (du plus simple au plus risqué).
 - Vérifications à chaque étape : `go build ./...`, `go vet ./...`, `make test`, `make lint`.
 
 ---
@@ -124,8 +124,8 @@ Implémentation Postgres :
 - Convertir chaque valeur en texte avec un helper `keyToText(v) (string, bool)` :
   - entiers signés ou non : `strconv` ;
   - `string` : telle quelle ;
-  - `[16]byte` (uuid renvoyé par pgx v4) : format canonique 8-4-4-4-12 ;
-  - `pgtype.UUID` s'il apparaît ;
+  - `[16]byte` (uuid renvoyé par `rows.Values()` en pgx v5) : format canonique 8-4-4-4-12 ;
+  - `pgtype.UUID` (`Bytes`, si `Valid`) s'il apparaît ;
   - tout autre type renvoie `false`.
 - Si toutes les valeurs sont convertibles, exécuter `SELECT * FROM <table> WHERE <column> = ANY($1::text[]::<dataType>[])` avec un argument `[]string`.
   - Le double cast est évalué une seule fois comme une constante, donc il **n'empêche pas** l'utilisation d'un index sur `<column>`. Le vérifier avec `EXPLAIN` sur la base locale et noter le résultat dans la PR.
