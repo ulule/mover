@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,6 +110,49 @@ func rowsToMap(rows pgx.Rows) (map[string]interface{}, error) {
 
 func marshalRows(rows pgx.Rows) (map[string]interface{}, error) {
 	return rowsToMap(rows)
+}
+
+// keyToText returns the text representation of a key value, as pgx v5 and convertValue return it. The second
+// value is false for types that cannot safely be sent as text.
+func keyToText(value interface{}) (string, bool) {
+	switch v := value.(type) {
+	case int:
+		return strconv.FormatInt(int64(v), 10), true
+	case int8:
+		return strconv.FormatInt(int64(v), 10), true
+	case int16:
+		return strconv.FormatInt(int64(v), 10), true
+	case int32:
+		return strconv.FormatInt(int64(v), 10), true
+	case int64:
+		return strconv.FormatInt(v, 10), true
+	case uint:
+		return strconv.FormatUint(uint64(v), 10), true
+	case uint8:
+		return strconv.FormatUint(uint64(v), 10), true
+	case uint16:
+		return strconv.FormatUint(uint64(v), 10), true
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10), true
+	case uint64:
+		return strconv.FormatUint(v, 10), true
+	case string:
+		return v, true
+	case [16]byte:
+		return uuidToText(v), true
+	case pgtype.UUID:
+		if !v.Valid {
+			return "", false
+		}
+
+		return uuidToText(v.Bytes), true
+	}
+
+	return "", false
+}
+
+func uuidToText(b [16]byte) string {
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // typeMap is only used to know if an OID is an array type.

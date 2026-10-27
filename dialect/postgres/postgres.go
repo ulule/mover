@@ -58,6 +58,78 @@ func (d *PGDialect) ResultSet(ctx context.Context, query string, args ...interfa
 	return results, nil
 }
 
+// selectInBatchSize is the maximum number of values sent in a single SelectIn query.
+const selectInBatchSize = 1000
+
+// selectInQuery returns the query of SelectIn. The data type comes from format_type, so it is not quoted.
+func selectInQuery(tableName, column, dataType string) string {
+	return fmt.Sprintf("SELECT * FROM %s WHERE %s = ANY($1::text[]::%s[])",
+		pgx.Identifier{tableName}.Sanitize(), pgx.Identifier{column}.Sanitize(), dataType)
+}
+
+// SelectIn returns the rows of a table whose column is one of the values. Keys of a known type are sent as a single
+// text array cast to the column type, so the planner can still use an index on the column. Other types fall back to
+// one query by value.
+func (d *PGDialect) SelectIn(ctx context.Context, table dialect.Table, column string, values []interface{}) ([]map[string]interface{}, error) {
+	var (
+		results  = make([]map[string]interface{}, 0)
+		dataType = table.Columns.Get(column).DataType
+		texts    = make([]string, 0, len(values))
+	)
+
+	for i := range values {
+		text, ok := keyToText(values[i])
+		if !ok || dataType == "" {
+			texts = nil
+			break
+		}
+
+		texts = append(texts, text)
+	}
+
+	if texts == nil {
+		query := fmt.Sprintf("SELECT * FROM %s WHERE %s = $1", pgx.Identifier{table.Name}.Sanitize(), pgx.Identifier{column}.Sanitize())
+
+		for i := range values {
+			rows, err := d.ResultSet(ctx, query, values[i])
+			if err != nil {
+				return nil, err
+			}
+
+			results = append(results, rows...)
+		}
+
+		return results, nil
+	}
+
+	query := selectInQuery(table.Name, column, dataType)
+
+	for start := 0; start < len(texts); start += selectInBatchSize {
+		end := min(start+selectInBatchSize, len(texts))
+
+		rows, err := d.query(ctx, query, texts[start:end])
+		if err != nil {
+			return nil, err
+		}
+
+		for rows.Next() {
+			result, err := marshalRows(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+
+			results = append(results, result)
+		}
+
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("unable to read rows of table %s: %w", table.Name, err)
+		}
+	}
+
+	return results, nil
+}
+
 // BulkInsert inserts multiple data a single database transaction. It disables triggers to avoid conflicts on
 // foreign constraints.
 func (d *PGDialect) BulkInsert(ctx context.Context, table dialect.Table, data []map[string]interface{}) error {

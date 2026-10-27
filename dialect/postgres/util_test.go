@@ -128,3 +128,27 @@ func TestValuesToPairs(t *testing.T) {
 	_, err = valuesToPairs(table, map[string]interface{}{"ts": []interface{}{"nope"}})
 	assert.Error(t, err)
 }
+
+func TestKeyToText(t *testing.T) {
+	uuid := [16]byte{0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17, 0x40, 0x00}
+
+	for value, expected := range map[interface{}]string{
+		int16(-3):                             "-3",
+		int32(42):                             "42",
+		int64(9007199254740993):               "9007199254740993",
+		uint32(7):                             "7",
+		uint64(18446744073709551615):          "18446744073709551615",
+		"abc":                                 "abc",
+		uuid:                                  "123e4567-e89b-12d3-a456-426614174000",
+		pgtype.UUID{Bytes: uuid, Valid: true}: "123e4567-e89b-12d3-a456-426614174000",
+	} {
+		text, ok := keyToText(value)
+		assert.True(t, ok, value)
+		assert.Equal(t, expected, text, value)
+	}
+
+	for _, value := range []interface{}{nil, 1.5, true, []byte("a"), []interface{}{1}, pgtype.UUID{}, time.Now(), map[string]interface{}{}} {
+		_, ok := keyToText(value)
+		assert.False(t, ok, value)
+	}
+}

@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -205,5 +206,142 @@ func TestTablesEquivalence(t *testing.T) {
 		require.Len(t, byName["mvt_multi_parent"].ReferenceKeys, 1)
 		assert.Equal(t, "a", byName["mvt_multi_parent"].ReferenceKeys[0].ColumnName)
 		assert.True(t, strings.HasPrefix(byName["mvt_multi_child"].ForeignKeys[0].Definition, "FOREIGN KEY (a, b)"))
+	})
+}
+
+const selectInFixture = `
+DROP TABLE IF EXISTS mvt_in;
+CREATE TABLE mvt_in (
+	id serial PRIMARY KEY,
+	int_col integer NOT NULL,
+	big_col bigint NOT NULL,
+	uuid_col uuid NOT NULL,
+	vc_col varchar(30) NOT NULL,
+	num_col numeric(10, 2) NOT NULL
+);
+INSERT INTO mvt_in (int_col, big_col, uuid_col, vc_col, num_col)
+SELECT i, i * 10000000000, md5(i::text)::uuid, 'key-' || i, i / 4.0 FROM generate_series(1, 20000) AS i;
+CREATE INDEX mvt_in_int_col ON mvt_in (int_col);
+CREATE INDEX mvt_in_uuid_col ON mvt_in (uuid_col);
+ANALYZE mvt_in;
+`
+
+// TestSelectIn runs against the table of a throwaway fixture. Run with:
+//
+//	MOVER_TEST_DSN=postgres://user@localhost:5432/db go test -tags integration ./dialect/postgres/ -run SelectIn -v
+func TestSelectIn(t *testing.T) {
+	dsn := os.Getenv("MOVER_TEST_DSN")
+	if dsn == "" {
+		t.Skip("MOVER_TEST_DSN is not set")
+	}
+
+	ctx := context.Background()
+
+	cfg, err := pgx.ParseConfig(dsn)
+	require.NoError(t, err)
+
+	counter := &queryCounter{}
+	cfg.Tracer = counter
+
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close(context.Background()) })
+
+	_, err = conn.Exec(ctx, selectInFixture)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := conn.Exec(context.Background(), "DROP TABLE IF EXISTS mvt_in")
+		assert.NoError(t, err)
+	})
+
+	d := &PGDialect{conn: conn}
+
+	tables, err := d.Tables(ctx)
+	require.NoError(t, err)
+
+	var table dialect.Table
+	for i := range tables {
+		if tables[i].Name == "mvt_in" {
+			table = tables[i]
+		}
+	}
+	require.Equal(t, "mvt_in", table.Name)
+
+	all, err := d.ResultSet(ctx, "SELECT * FROM mvt_in ORDER BY id LIMIT 3000")
+	require.NoError(t, err)
+
+	ids := func(rows []map[string]interface{}) []int {
+		res := make([]int, len(rows))
+		for i := range rows {
+			res[i] = int(rows[i]["id"].(int32))
+		}
+		sort.Ints(res)
+
+		return res
+	}
+
+	for _, column := range []string{"int_col", "big_col", "uuid_col", "vc_col", "num_col", "id"} {
+		t.Run(column, func(t *testing.T) {
+			// 1500 values: two batches
+			values := make([]interface{}, 0, 1500)
+			for i := 0; i < 3000; i += 2 {
+				values = append(values, all[i][column])
+			}
+
+			counter.count.Store(0)
+			rows, err := d.SelectIn(ctx, table, column, values)
+			require.NoError(t, err)
+
+			expected := make([]int, 0, 1500)
+			for i := 0; i < 3000; i += 2 {
+				expected = append(expected, int(all[i]["id"].(int32)))
+			}
+			assert.Equal(t, expected, ids(rows))
+
+			if column == "num_col" {
+				// numeric values are float64, and use the fallback: one query by value
+				assert.EqualValues(t, len(values), counter.count.Load())
+			} else {
+				assert.EqualValues(t, 2, counter.count.Load(), "two batches of at most %d values", selectInBatchSize)
+			}
+		})
+	}
+
+	t.Run("empty", func(t *testing.T) {
+		counter.count.Store(0)
+		rows, err := d.SelectIn(ctx, table, "int_col", nil)
+		require.NoError(t, err)
+		assert.Empty(t, rows)
+		assert.EqualValues(t, 0, counter.count.Load())
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		rows, err := d.SelectIn(ctx, table, "vc_col", []interface{}{"nope"})
+		require.NoError(t, err)
+		assert.Empty(t, rows)
+	})
+
+	t.Run("plan", func(t *testing.T) {
+		for _, tc := range []struct {
+			column string
+			args   []string
+		}{
+			{"int_col", []string{"3", "17", "4242"}},
+			{"uuid_col", []string{"c81e728d-9d4c-2f63-6f06-7f89cc14862c"}},
+		} {
+			rows, err := conn.Query(ctx, "EXPLAIN "+selectInQuery("mvt_in", tc.column, table.Columns.Get(tc.column).DataType), tc.args)
+			require.NoError(t, err)
+
+			var plan []string
+			for rows.Next() {
+				var line string
+				require.NoError(t, rows.Scan(&line))
+				plan = append(plan, line)
+			}
+			require.NoError(t, rows.Err())
+
+			t.Logf("%s:\n%s", tc.column, strings.Join(plan, "\n"))
+			assert.Contains(t, strings.Join(plan, "\n"), "Index Scan", tc.column)
+		}
 	})
 }
