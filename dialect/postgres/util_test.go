@@ -152,3 +152,16 @@ func TestKeyToText(t *testing.T) {
 		assert.False(t, ok, value)
 	}
 }
+
+func TestInsertQuery(t *testing.T) {
+	table := dialect.Table{
+		Name:        "users",
+		PrimaryKeys: []dialect.PrimaryKey{{Name: "id"}},
+		Columns:     dialect.Columns{{Name: "id", DataType: "integer"}},
+	}
+
+	query, args, err := insertQuery(table, map[string]interface{}{"id": int32(1)})
+	require.NoError(t, err)
+	assert.Equal(t, `INSERT INTO "users" ("id") VALUES ($1) ON CONFLICT ("id") DO NOTHING`, query)
+	assert.Equal(t, []interface{}{int32(1)}, args)
+}

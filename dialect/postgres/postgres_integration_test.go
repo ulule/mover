@@ -345,3 +345,74 @@ func TestSelectIn(t *testing.T) {
 		}
 	})
 }
+
+// TestBulkInsert runs against a throwaway table. Run with:
+//
+//	MOVER_TEST_DSN=postgres://user@localhost:5432/db go test -tags integration ./dialect/postgres/ -run BulkInsert -v
+func TestBulkInsert(t *testing.T) {
+	dsn := os.Getenv("MOVER_TEST_DSN")
+	if dsn == "" {
+		t.Skip("MOVER_TEST_DSN is not set")
+	}
+
+	ctx := context.Background()
+
+	conn, err := pgx.Connect(ctx, dsn)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close(context.Background()) })
+
+	_, err = conn.Exec(ctx, `
+DROP TABLE IF EXISTS mvt_bulk;
+CREATE TABLE mvt_bulk (id serial PRIMARY KEY, name varchar(10) NOT NULL);`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := conn.Exec(context.Background(), "DROP TABLE IF EXISTS mvt_bulk")
+		assert.NoError(t, err)
+	})
+
+	d := &PGDialect{conn: conn}
+
+	table := dialect.Table{
+		Name:        "mvt_bulk",
+		PrimaryKeys: []dialect.PrimaryKey{{Name: "id"}},
+		Columns: dialect.Columns{
+			{Name: "id", DataType: "integer"},
+			{Name: "name", DataType: "character varying(10)"},
+		},
+	}
+
+	count := func() int {
+		var n int
+		require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM mvt_bulk").Scan(&n))
+
+		return n
+	}
+
+	// 1201 rows: two full batches and a partial one
+	rows := make([]map[string]interface{}, 0, 2*insertBatchSize+201)
+	for i := 1; i <= 2*insertBatchSize+201; i++ {
+		rows = append(rows, map[string]interface{}{"id": int32(i), "name": "row"})
+	}
+
+	require.NoError(t, d.BulkInsert(ctx, table, rows))
+	assert.Equal(t, len(rows), count())
+
+	// idempotent thanks to ON CONFLICT DO NOTHING
+	require.NoError(t, d.BulkInsert(ctx, table, rows))
+	assert.Equal(t, len(rows), count())
+
+	// a failing row aborts the whole transaction
+	failing := []map[string]interface{}{
+		{"id": int32(5000), "name": "ok"},
+		{"id": int32(5001), "name": "this name is too long"},
+	}
+	err = d.BulkInsert(ctx, table, failing)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "row 1")
+	assert.Contains(t, err.Error(), "mvt_bulk")
+	assert.Equal(t, len(rows), count())
+
+	// the connection is still usable
+	require.NoError(t, d.BulkInsert(ctx, table, failing[:1]))
+	assert.Equal(t, len(rows)+1, count())
+}

@@ -130,24 +130,44 @@ func (d *PGDialect) SelectIn(ctx context.Context, table dialect.Table, column st
 	return results, nil
 }
 
-// BulkInsert inserts multiple data a single database transaction. It disables triggers to avoid conflicts on
-// foreign constraints.
-func (d *PGDialect) BulkInsert(ctx context.Context, table dialect.Table, data []map[string]interface{}) error {
-	var err error
+// insertBatchSize is the maximum number of insert queries sent in a single batch.
+const insertBatchSize = 500
 
+// BulkInsert inserts multiple data a single database transaction. It disables triggers to avoid conflicts on
+// foreign constraints. Rows are sent by batches of insertBatchSize queries.
+func (d *PGDialect) BulkInsert(ctx context.Context, table dialect.Table, data []map[string]interface{}) error {
 	tx, err := d.conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("unable to begin transaction on table %s: %w", table.Name, err)
 	}
 
-	defer func() {
-		err = tx.Rollback(ctx)
-	}()
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := d.disableTriggers(ctx, table, func(ctx context.Context) error {
-		for i := range data {
-			if err := d.insert(ctx, table, data[i]); err != nil {
-				return err
+	if err := d.disableTriggers(ctx, tx, table, func(ctx context.Context) error {
+		for start := 0; start < len(data); start += insertBatchSize {
+			end := min(start+insertBatchSize, len(data))
+			b := &pgx.Batch{}
+
+			for i := start; i < end; i++ {
+				query, args, err := insertQuery(table, data[i])
+				if err != nil {
+					return fmt.Errorf("unable to build insert query of row %d on table %s: %w", i, table.Name, err)
+				}
+
+				b.Queue(query, args...)
+			}
+
+			br := tx.SendBatch(ctx, b)
+
+			for i := start; i < end; i++ {
+				if _, err := br.Exec(); err != nil {
+					_ = br.Close()
+					return fmt.Errorf("unable to insert row %d on table %s: %w", i, table.Name, err)
+				}
+			}
+
+			if err := br.Close(); err != nil {
+				return fmt.Errorf("unable to close batch on table %s: %w", table.Name, err)
 			}
 		}
 
@@ -164,7 +184,7 @@ func (d *PGDialect) BulkInsert(ctx context.Context, table dialect.Table, data []
 		return fmt.Errorf("unable to reset sequence on table %s: %w", table.Name, err)
 	}
 
-	return err
+	return nil
 }
 
 // ReferenceKeys returns the "Referenced by" constraints of a table.
@@ -624,34 +644,32 @@ func (d *PGDialect) exec(ctx context.Context, query string, args ...interface{})
 	return nil
 }
 
-func (d *PGDialect) insert(ctx context.Context, table dialect.Table, data map[string]interface{}) error {
+// insertQuery returns the query and the arguments inserting a row, ignoring primary key conflicts.
+func insertQuery(table dialect.Table, data map[string]interface{}) (query string, args []interface{}, err error) {
 	pairs, err := valuesToPairs(table, data)
 	if err != nil {
-		return fmt.Errorf("unable to convert %v to pairs: %w", data, err)
+		return "", nil, fmt.Errorf("unable to convert %v to pairs: %w", data, err)
 	}
 
-	query, args := lk.Insert(table.Name).
+	query, args = lk.Insert(table.Name).
 		Set(pairs...).
 		OnConflict(table.PrimaryKeyColumnName(), lk.DoNothing()).
 		Query()
-	if err := d.exec(ctx, query, args...); err != nil {
-		return fmt.Errorf("unable to insert %v+ to %s:%w", pairs, table.Name, err)
-	}
 
-	return nil
+	return query, args, nil
 }
 
-func (d *PGDialect) disableTriggers(ctx context.Context, table dialect.Table, f func(ctx context.Context) error) error {
-	if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER ALL;", table.Name)); err != nil {
-		return err
+func (d *PGDialect) disableTriggers(ctx context.Context, tx pgx.Tx, table dialect.Table, f func(ctx context.Context) error) error {
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER TABLE %s DISABLE TRIGGER ALL;", table.Name)); err != nil {
+		return fmt.Errorf("unable to disable triggers on table %s: %w", table.Name, err)
 	}
 
 	if err := f(ctx); err != nil {
 		return err
 	}
 
-	if err := d.exec(ctx, fmt.Sprintf("ALTER TABLE %s ENABLE TRIGGER ALL;", table.Name)); err != nil {
-		return err
+	if _, err := tx.Exec(ctx, fmt.Sprintf("ALTER TABLE %s ENABLE TRIGGER ALL;", table.Name)); err != nil {
+		return fmt.Errorf("unable to enable triggers on table %s: %w", table.Name, err)
 	}
 
 	return nil
