@@ -71,6 +71,10 @@ func (p *pending) keys() []fetchKey {
 
 // request adds a value to look up at the next level, unless it has already been requested.
 func (e *extractor) request(next *pending, key fetchKey, value interface{}) {
+	if e.schema[key.table].Exclude {
+		return
+	}
+
 	id := fmt.Sprintf("%v", value)
 
 	values, ok := e.fetched[key]
@@ -140,6 +144,10 @@ func (e *extractor) visit(rows resultSet, table dialect.Table, root bool, next *
 		}
 
 		for i := range schema.Queries {
+			if e.schema[schema.Queries[i].Table.Name].Exclude {
+				continue
+			}
+
 			raw := rawQuery{
 				table: schema.Queries[i].Table.Name,
 				query: replaceVar(schema.Queries[i].Query, row),
@@ -162,6 +170,10 @@ func (e *extractor) Handle(ctx context.Context, schema config.Schema, query stri
 		tableName = table.Name
 		cacheKey  = cacheKey(query, args...)
 	)
+
+	if e.schema[tableName].Exclude {
+		return fmt.Errorf("table %s is excluded", tableName)
+	}
 
 	if _, ok := e.extract[tableName]; !ok {
 		e.extract[tableName] = make(entry)

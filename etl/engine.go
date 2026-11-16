@@ -49,6 +49,29 @@ func copySchemaTables(schema []config.Schema, tables []dialectpkg.Table) map[str
 	return schemas
 }
 
+// warnUnknownTables logs the schema and extra entries whose table does not exist in the database.
+func warnUnknownTables(logger *zap.Logger, cfg config.Config, tables []dialectpkg.Table) {
+	known := make(map[string]struct{}, len(tables))
+	for i := range tables {
+		known[tables[i].Name] = struct{}{}
+	}
+
+	sections := []struct {
+		name    string
+		entries []config.Schema
+	}{{"schema", cfg.Schema}, {"extra", cfg.Extra}}
+
+	for _, section := range sections {
+		for i := range section.entries {
+			if _, ok := known[section.entries[i].TableName]; !ok {
+				logger.Warn("Unknown table in configuration",
+					zap.String("section", section.name),
+					zap.String("table", section.entries[i].TableName))
+			}
+		}
+	}
+}
+
 // Engine extracts and loads data from database with specific dialect.
 type Engine struct {
 	schema  map[string]config.Schema
@@ -74,6 +97,8 @@ func NewEngine(ctx context.Context, cfg config.Config, dsn string, logger *zap.L
 	if err != nil {
 		return nil, err
 	}
+
+	warnUnknownTables(logger, cfg, tables)
 
 	schema := copySchemaTables(cfg.Schema, tables)
 
@@ -115,6 +140,11 @@ func (e *Engine) Extract(ctx context.Context, outputPath, query string) error {
 
 	for i := range e.config.Extra {
 		tableName := e.config.Extra[i].TableName
+		if e.schema[tableName].Exclude {
+			e.logger.Warn("Skip excluded extra table", zap.String("table", tableName))
+			continue
+		}
+
 		query, _ := lk.Select(lk.Raw("*")).
 			From(tableName).Query()
 		if err := extractor.Handle(ctx, e.schema[tableName], query); err != nil {
@@ -125,6 +155,11 @@ func (e *Engine) Extract(ctx context.Context, outputPath, query string) error {
 	extractor.logSummary()
 
 	for tableName := range extractor.extract {
+		// safety net: an excluded table must never be written
+		if e.schema[tableName].Exclude {
+			continue
+		}
+
 		if err := e.extract(ctx, outputPath, e.schema[tableName], extractor.extract[tableName]); err != nil {
 			return fmt.Errorf("unable to extract rows from table %s: %w", tableName, err)
 		}
