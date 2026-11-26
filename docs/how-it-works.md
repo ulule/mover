@@ -76,6 +76,7 @@ La config décrit ce que mover ne peut pas deviner tout seul à partir du schém
 | `schema[].table_name` | Table concernée par le bloc. Une table absente de la config est quand même extraite si on l'atteint, simplement sans règle particulière. |
 | `reference_keys` | Noms de contraintes FK (`conname`) à suivre « vers le bas », c'est-à-dire du parent vers les enfants, même quand la table n'est pas la racine (voir § 3.3). |
 | `omit_reference_keys` | Si `true`, la table racine ne suit pas automatiquement ses enfants. |
+| `exclude` | Si `true`, la table n'est jamais extraite : aucune de ses lignes n'est requêtée ni écrite, et le parcours ne repart jamais d'elle. Les valeurs de FK qui pointent vers elle sont conservées telles quelles dans les autres tables (voir § 3.3 et § 6). Une table `extra` exclue est ignorée avec un warning, une racine exclue fait échouer l'extraction. |
 | `queries` | Requêtes SQL libres, exécutées une fois **par ligne** de la table. `{col}` est remplacé par la valeur de la colonne. `table_name` indique la table des lignes renvoyées. |
 | `columns[].fake` | Remplace la valeur par une fausse : `first_name`, `last_name`, `email`, `street_address`, `phone_number`. |
 | `columns[].unique` | Retire au sort jusqu'à obtenir une valeur pas encore utilisée dans cette colonne. |
@@ -136,6 +137,8 @@ SELECT * FROM "shop_order" WHERE "user_id" = ANY($1::text[]::integer[])
 ```
 
 Le double cast permet d'envoyer toutes les valeurs sous forme de texte, quel que soit le type de la colonne. Postgres le replie en constante et utilise l'index normalement. Pour un type de clé qui ne se convertit pas en texte, mover revient à une requête par valeur (`col = $1`).
+
+Les tables marquées `exclude` dans la config sont ignorées à chaque étape : mover ne demande aucune valeur pour elles (FK, reference keys et `queries` comprises), donc ne les requête pas et ne repart pas d'elles. Une table atteinte aussi par un autre chemin reste extraite normalement.
 
 Deux mécanismes évitent de tourner en rond ou de refaire le même travail :
 - une ligne déjà visitée (identifiée par sa table et sa clé primaire) n'est pas revisitée ;
@@ -223,4 +226,5 @@ mover utilise une seule connexion Postgres, sans pool. Il n'y a jamais deux requ
 - **`queries` coûte une requête par ligne.** Sur une table de plusieurs milliers de lignes, c'est souvent ce qui domine le temps d'extraction.
 - **Grands entiers** : au load, les nombres JSON sont lus en `float64`, donc un `bigint` au-delà de 2^53 perd sa précision.
 - **Séquences** : le recalage suppose une colonne `id` et une séquence `<table>_id_seq`. Si elle n'existe pas, le load s'arrête sur cette table.
+- **FK pendantes avec `exclude`.** Les valeurs de FK vers une table exclue restent dans les autres tables (pas de mise à `NULL`) : les lignes référencées n'existent pas dans le dossier extrait. Le load n'échoue pas grâce à `DISABLE TRIGGER ALL`, mais la base rechargée contient des FK pendantes.
 - **Code de sortie** toujours 0, voir § 1.

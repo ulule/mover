@@ -37,12 +37,15 @@ type Column struct {
 }
 
 type Schema struct {
-	TableName         string        `json:"table_name"`
-	OmitReferenceKeys bool          `json:"omit_reference_keys"`
-	ReferenceKeys     []string      `json:"reference_keys"`
-	Queries           []Query       `json:"queries"`
-	Columns           []Column      `json:"columns"`
-	Table             dialect.Table `json:"-"`
+	TableName         string `json:"table_name"`
+	OmitReferenceKeys bool   `json:"omit_reference_keys"`
+	// Exclude removes the table from the extraction: none of its rows is queried or written, and the traversal never
+	// continues from it. Foreign key values pointing to it are kept as is in the other tables.
+	Exclude       bool          `json:"exclude"`
+	ReferenceKeys []string      `json:"reference_keys"`
+	Queries       []Query       `json:"queries"`
+	Columns       []Column      `json:"columns"`
+	Table         dialect.Table `json:"-"`
 }
 
 type Config struct {

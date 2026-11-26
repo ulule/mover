@@ -326,3 +326,144 @@ func TestExtractorExtra(t *testing.T) {
 	_, err := os.Stat(filepath.Join(output, "child.json"))
 	assert.NoError(t, err)
 }
+
+// excludeTable flags a table of the schema as excluded.
+func excludeTable(schema map[string]config.Schema, name string) {
+	s := schema[name]
+	s.Exclude = true
+	schema[name] = s
+}
+
+// withGrandparent adds the table "gp", referenced by parent.gp_id and child.gp_id. Parents point to gp(200), children to
+// nothing: a test sets child.gp_id to reach gp without going through parent.
+func withGrandparent(d *fakeDialect, schema map[string]config.Schema) {
+	gp := dialect.Table{Name: "gp", PrimaryKeys: []dialect.PrimaryKey{{Name: "id", TableName: "gp"}}}
+	schema["gp"] = config.Schema{TableName: "gp", Table: gp}
+
+	for _, name := range []string{"parent", "child"} {
+		s := schema[name]
+		s.Table.ForeignKeys = append(s.Table.ForeignKeys, dialect.ForeignKey{
+			Name: name + "_gp_fk", ColumnName: "gp_id", ReferencedTable: gp, ReferencedColumnName: "id",
+		})
+		schema[name] = s
+	}
+
+	d.tables["gp"] = []map[string]interface{}{{"id": int32(200)}}
+	for _, row := range d.tables["parent"] {
+		row["gp_id"] = int32(200)
+	}
+}
+
+func TestExtractorExcludedParent(t *testing.T) {
+	var (
+		d      = newTestDialect()
+		schema = testSchema()
+	)
+
+	withGrandparent(d, schema)
+	excludeTable(schema, "parent")
+
+	e := newTestExtractor(d, schema)
+	require.NoError(t, e.Handle(context.Background(), schema["child"], "SELECT * FROM child WHERE id = 1"))
+
+	// neither the parent nor the grandparent, only reachable through it, are selected
+	assert.Equal(t, []string{"child(1)", "grandchild(20)", "grandchild(21)"}, extracted(e))
+	assert.NotContains(t, d.selectIn, "parent")
+	assert.NotContains(t, d.selectIn, "gp")
+}
+
+func TestExtractorExcludedTableReachedByAnotherPath(t *testing.T) {
+	var (
+		d      = newTestDialect()
+		schema = testSchema()
+	)
+
+	withGrandparent(d, schema)
+	excludeTable(schema, "parent")
+
+	// the child points to gp directly
+	d.tables["child"][0]["gp_id"] = int32(200)
+
+	e := newTestExtractor(d, schema)
+	require.NoError(t, e.Handle(context.Background(), schema["child"], "SELECT * FROM child WHERE id = 1"))
+
+	assert.Equal(t, []string{"child(1)", "gp(200)", "grandchild(20)", "grandchild(21)"}, extracted(e))
+	assert.NotContains(t, d.selectIn, "parent")
+}
+
+func TestExtractorExcludedChild(t *testing.T) {
+	t.Run("reference key", func(t *testing.T) {
+		var (
+			d      = newTestDialect()
+			schema = testSchema()
+		)
+
+		excludeTable(schema, "child")
+
+		e := newTestExtractor(d, schema)
+		require.NoError(t, e.Handle(context.Background(), schema["parent"], "SELECT * FROM parent WHERE id = 10"))
+
+		assert.Equal(t, []string{"parent(10)"}, extracted(e))
+		assert.NotContains(t, d.selectIn, "child")
+		assert.NotContains(t, d.selectIn, "grandchild")
+	})
+
+	t.Run("config query", func(t *testing.T) {
+		var (
+			d      = newTestDialect()
+			schema = testSchema()
+		)
+
+		child := schema["child"]
+		child.OmitReferenceKeys = true
+		child.Queries = []config.Query{{TableName: "extra", Table: schema["extra"].Table, Query: "SELECT * FROM extra WHERE id = {parent_id}0"}}
+		schema["child"] = child
+		excludeTable(schema, "extra")
+
+		e := newTestExtractor(d, schema)
+		require.NoError(t, e.Handle(context.Background(), child, "SELECT * FROM child WHERE id = 1"))
+
+		assert.Equal(t, []string{"child(1)", "parent(10)"}, extracted(e))
+		assert.Equal(t, 1, d.resultSets, "only the root query")
+	})
+}
+
+func TestExtractorExcludedRoot(t *testing.T) {
+	var (
+		d      = newTestDialect()
+		schema = testSchema()
+	)
+
+	excludeTable(schema, "parent")
+
+	e := newTestExtractor(d, schema)
+	err := e.Handle(context.Background(), schema["parent"], "SELECT * FROM parent WHERE id = 10")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "excluded")
+	assert.Equal(t, 0, d.resultSets)
+
+	engine := &Engine{schema: schema, dialect: d, config: config.Config{}, logger: zap.NewNop()}
+	require.Error(t, engine.Extract(context.Background(), t.TempDir(), "SELECT * FROM parent WHERE id = 10"))
+}
+
+func TestExtractorExcludedExtra(t *testing.T) {
+	var (
+		d      = newTestDialect()
+		schema = testSchema()
+	)
+
+	excludeTable(schema, "extra")
+
+	cfg := config.Config{Extra: []config.Schema{{TableName: "extra"}}}
+	engine := &Engine{schema: schema, dialect: d, config: cfg, logger: zap.NewNop()}
+
+	output := t.TempDir()
+	require.NoError(t, engine.Extract(context.Background(), output, "SELECT * FROM parent WHERE id = 10"))
+
+	_, err := os.Stat(filepath.Join(output, "parent.json"))
+	assert.NoError(t, err)
+
+	_, err = os.Stat(filepath.Join(output, "extra.json"))
+	assert.True(t, os.IsNotExist(err), "no file for an excluded table")
+	assert.Equal(t, 1, d.resultSets, "only the root query")
+}
