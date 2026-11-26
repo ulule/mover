@@ -27,7 +27,7 @@ description: Faire un aller-retour réel extract puis load de mover en local, d'
    ```bash
    /tmp/mover-rt -dsn "postgres://localhost/mover_rt" -path /tmp/mover-rt-out -action load 2>&1 | tee /tmp/mover-rt-load.log
    ```
-5. **Contrôles.** mover renvoie toujours 0 : ce sont les logs et les comptes qui font foi.
+5. **Contrôles.** mover sort en code 1 sur une erreur (derrière `| tee`, il faut `set -o pipefail` pour le voir). Une erreur de téléchargement des médias reste en code 0, et un code 0 ne prouve pas que toutes les lignes sont là : les logs et les comptes font foi.
    - `grep -iE '"level":"(error|panic)"|unable to|panic' /tmp/mover-rt-*.log` doit être vide.
    - Pour chaque `<table>.json`, `count` doit être égal à `SELECT count(*) FROM <table>` dans `mover_rt`.
    - Les colonnes anonymisées ne contiennent plus les valeurs d'origine.

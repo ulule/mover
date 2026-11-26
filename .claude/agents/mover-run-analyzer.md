@@ -12,7 +12,7 @@ Tu analyses un run mover. Tu ne modifies rien et tu ne relances aucun workflow.
 
 ## Repères dans les logs (zap, JSON en prod)
 - La fin de l'extraction est marquée par `"Extraction done"`, avec les champs `queries` (nombre de requêtes SQL) et `rows` (lignes par table).
-- Rappel : mover renvoie **toujours le code de sortie 0**. Un run vert peut donc cacher une erreur. Cherche `"level":"error"`, `unable to`, `panic`, `unsupported array data type`.
+- mover sort en code 1 sur toute erreur (depuis `20469d0`) : un run rouge pointe vers la ligne `"level":"error"` qui l'a causé. Sur un run plus ancien, le code est toujours 0 : cherche `"level":"error"`, `unable to`, `panic`, `unsupported array data type`.
 - Les erreurs de médias (`download`) sont non bloquantes : compte-les à part.
 - Au load, chaque table est chargée dans sa propre transaction. Une erreur sur une table n'annule pas les tables déjà chargées, et `resetSequence` peut échouer si `<table>_id_seq` n'existe pas.
 
