@@ -40,7 +40,7 @@ mover -dsn "$LOCAL_DSN" -path output -action load
 
 La variable `MOVER_CONF` donne le chemin de la config JSON. Si elle est absente ou illisible, mover logue l'erreur et continue sans config, donc sans anonymisation.
 
-**Attention :** mover renvoie toujours le code de sortie 0, même en cas d'erreur. Il faut lire les logs pour savoir si un run a réussi.
+mover sort en code 1 sur toute erreur, après l'avoir loguée : un script avec `set -e` ou une étape de CI s'arrête sur un run raté. Une config `MOVER_CONF` illisible est une erreur : sans elle, un extract ne serait pas anonymisé.
 
 ## 2. La config
 

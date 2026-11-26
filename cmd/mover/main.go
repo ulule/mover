@@ -37,6 +37,12 @@ func main() {
 		return
 	}
 
+	os.Exit(run())
+}
+
+// run executes the action and returns the exit code: 1 on any error, so that a
+// caller (set -e in a script, a CI step) stops on a failed run.
+func run() int {
 	var (
 		ctx    = context.Background()
 		logger *zap.Logger
@@ -51,22 +57,20 @@ func main() {
 
 	var cfg config.Config
 	if conf := os.Getenv("MOVER_CONF"); conf != "" {
+		// Without its configuration, an extract would skip the anonymization.
 		if err := config.Load(conf, &cfg); err != nil {
 			logger.Error("unable to config", zap.Error(err), zap.String("config_path", conf))
+			return 1
 		}
 	}
 
 	engine, err := etl.NewEngine(ctx, cfg, dsn, logger)
 	if err != nil {
 		logger.Error("unable to initialize engine", zap.Error(err))
-		return
+		return 1
 	}
-	defer func() {
-		if err := engine.Shutdown(ctx); err != nil {
-			logger.Error("unable to shutdown engine", zap.Error(err))
-		}
-	}()
 
+	code := 0
 	switch action {
 	case "extract":
 		if err := engine.Extract(ctx, path, query); err != nil {
@@ -74,12 +78,14 @@ func main() {
 				zap.Error(err),
 				zap.String("table_name", tableName),
 				zap.String("query", query))
+			code = 1
 		}
 	case "load":
 		if err := engine.Load(ctx, path); err != nil {
 			logger.Error("unable to load data",
 				zap.Error(err),
 				zap.String("path", path))
+			code = 1
 		}
 	case "describe":
 		table, err := engine.Describe(ctx, tableName)
@@ -87,8 +93,19 @@ func main() {
 			logger.Error("unable to describe table",
 				zap.Error(err),
 				zap.String("table_name", tableName))
+			code = 1
+		} else {
+			fmt.Printf("%v+\n", table)
 		}
-
-		fmt.Printf("%v+\n", table)
+	default:
+		logger.Error("unknown action", zap.String("action", action))
+		code = 1
 	}
+
+	if err := engine.Shutdown(ctx); err != nil {
+		logger.Error("unable to shutdown engine", zap.Error(err))
+		code = 1
+	}
+
+	return code
 }

@@ -42,7 +42,7 @@ La CI (`.github/workflows`) lance build, `go test ./...` et golangci-lint. Les t
 
 ## Pièges connus
 
-- La CLI renvoie toujours le code de sortie 0. Une config illisible est seulement loguée. Il faut lire les logs.
+- La CLI sort en code 1 sur toute erreur (config illisible, action inconnue, échec de l'extract, du load ou de l'arrêt du moteur), après l'avoir loguée.
 - Seul le schéma `public` est lu. La PK est obligatoire et seule sa première colonne est utilisée. Pour une FK multi-colonnes, seule la première colonne compte.
 - Les reference keys (relations vers les enfants) ne sont suivies automatiquement que depuis la racine. Ailleurs, il faut les déclarer par nom de contrainte dans `schema[].reference_keys`.
 - Au load, le JSON est décodé sans `UseNumber` : un `bigint` au-delà de 2^53 perd sa précision.
