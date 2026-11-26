@@ -24,4 +24,4 @@ ulule-fixtures épingle mover par **sha complet**, à deux endroits qui doivent 
    GOPRIVATE=github.com/ulule/* go install github.com/ulule/mover/cmd/mover@<sha>
    ```
    Puis vérifie que le binaire installé est le bon avec `go version -m "$(command -v mover)" | grep -m1 mod`.
-5. **Premier run** : le workflow `fixtures` de ulule-fixtures se déclenche manuellement. Ne le lance pas toi-même sans accord. Une fois le run fini, confie l'analyse des logs au sous-agent `mover-run-analyzer`. Rappel : un run vert ne garantit rien, puisque mover sort toujours avec le code 0.
+5. **Premier run** : le workflow `fixtures` de ulule-fixtures se déclenche manuellement. Ne le lance pas toi-même sans accord. Une fois le run fini, confie l'analyse des logs au sous-agent `mover-run-analyzer`. Depuis `20469d0`, mover sort en code 1 sur toute erreur et `bin/extract` (`set -e`) s'arrête : un run vert veut dire que l'extraction a réussi. Les erreurs de médias restent non bloquantes, à vérifier dans les logs.

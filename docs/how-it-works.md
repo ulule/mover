@@ -38,7 +38,7 @@ mover -dsn "$LOCAL_DSN" -path output -action load
 | `-verbose` | Logs détaillés (zap en mode développement). |
 | `-version` | Affiche la version. |
 
-La variable `MOVER_CONF` donne le chemin de la config JSON. Si elle est absente ou illisible, mover logue l'erreur et continue sans config, donc sans anonymisation.
+La variable `MOVER_CONF` donne le chemin de la config JSON. Si elle est absente, mover tourne sans config, donc sans anonymisation. Si elle est illisible, mover logue l'erreur et sort en code 1.
 
 mover sort en code 1 sur toute erreur, après l'avoir loguée : un script avec `set -e` ou une étape de CI s'arrête sur un run raté. Une config `MOVER_CONF` illisible est une erreur : sans elle, un extract ne serait pas anonymisé.
 
@@ -223,4 +223,4 @@ mover utilise une seule connexion Postgres, sans pool. Il n'y a jamais deux requ
 - **`queries` coûte une requête par ligne.** Sur une table de plusieurs milliers de lignes, c'est souvent ce qui domine le temps d'extraction.
 - **Grands entiers** : au load, les nombres JSON sont lus en `float64`, donc un `bigint` au-delà de 2^53 perd sa précision.
 - **Séquences** : le recalage suppose une colonne `id` et une séquence `<table>_id_seq`. Si elle n'existe pas, le load s'arrête sur cette table.
-- **Code de sortie** toujours 0, voir § 1.
+- **Code de sortie** : 1 sur toute erreur, voir § 1. Les erreurs de téléchargement des médias ne comptent pas.
